@@ -3,6 +3,27 @@
 
 #include "global.h"
 
+static VOID NTAPI _app_notify_applythread (
+	_In_ PVOID arglist
+)
+{
+	PITEM_APP ptr_app;
+	PR_LIST rules;
+	HANDLE hengine;
+
+	ptr_app = arglist;
+
+	hengine = _wfp_getenginehandle ();
+	rules = _r_obj_createlist (2, NULL);
+
+	_r_obj_addlistitem (rules, ptr_app, NULL);
+
+	_wfp_create3filters (hengine, rules, DBG_ARG, FALSE);
+
+	_r_obj_dereference (rules);
+	_r_obj_dereference (ptr_app);
+}
+
 _Ret_maybenull_
 HWND _app_notify_getwindow (
 	_In_opt_ PITEM_LOG ptr_log
@@ -15,7 +36,11 @@ HWND _app_notify_getwindow (
 	if (hwnd)
 	{
 		if (ptr_log)
+		{
 			_app_notify_show (hwnd, ptr_log);
+
+			_r_obj_dereference (ptr_log);
+		}
 
 		return hwnd;
 	}
@@ -23,7 +48,14 @@ HWND _app_notify_getwindow (
 	if (!ptr_log)
 		return NULL;
 
-	_r_wnd_createwindow (_r_sys_getimagebase (), MAKEINTRESOURCE (IDD_NOTIFICATION), NULL, &NotificationProc, ptr_log);
+	hwnd = _r_wnd_createwindow (_r_sys_getimagebase (), MAKEINTRESOURCE (IDD_NOTIFICATION), NULL, &NotificationProc, ptr_log);
+
+	if (!hwnd)
+	{
+		_r_obj_dereference (ptr_log);
+
+		return NULL;
+	}
 
 	_r_sys_waitforsingleobject (config.hnotify_evt, 2000);
 
@@ -68,7 +100,6 @@ BOOLEAN _app_notify_command (
 {
 	PITEM_APP ptr_app;
 	PR_LIST rules;
-	HANDLE hengine;
 	ULONG app_hash;
 
 	app_hash = _app_notify_getapp_id (hwnd);
@@ -111,11 +142,7 @@ BOOLEAN _app_notify_command (
 	if (rules->count)
 	{
 		if (_wfp_isfiltersinstalled ())
-		{
-			hengine = _wfp_getenginehandle ();
-
-			_wfp_create3filters (hengine, rules, DBG_ARG, FALSE);
-		}
+			_r_workqueue_queueitem (&wfp_queue, &_app_notify_applythread, _r_obj_reference (ptr_app));
 	}
 
 	_app_listview_updateby_id (_r_app_gethwnd (), ptr_app->type, PR_UPDATE_TYPE);
@@ -123,7 +150,7 @@ BOOLEAN _app_notify_command (
 	_r_obj_dereference (ptr_app);
 	_r_obj_dereference (rules);
 
-	_app_profile_save (hwnd);
+	_app_profile_save_deferred ();
 
 	return TRUE;
 }
@@ -136,6 +163,7 @@ BOOLEAN _app_notify_addobject (
 {
 	LONG64 current_time;
 	LONG64 notification_timeout;
+	PITEM_LOG notify_log;
 
 	current_time = _r_unixtime_now ();
 	notification_timeout = _r_config_getlong64 (L"NotificationsTimeout", NOTIFY_TIMEOUT_DEFAULT, NULL);
@@ -148,7 +176,9 @@ BOOLEAN _app_notify_addobject (
 
 	_r_obj_swapreference (&ptr_app->notification, ptr_log);
 
-	if (_r_wnd_sendmessage (hwnd, 0, WM_NOTIFICATION, 0, (LPARAM)ptr_app->notification))
+	notify_log = _r_obj_reference (ptr_app->notification);
+
+	if (PostMessageW (hwnd, WM_NOTIFICATION, 0, (LPARAM)notify_log))
 	{
 		if (_r_config_getboolean (L"IsNotificationsSound", TRUE, NULL))
 		{
@@ -158,6 +188,8 @@ BOOLEAN _app_notify_addobject (
 
 		return TRUE;
 	}
+
+	_r_obj_dereference (notify_log);
 
 	return FALSE;
 }

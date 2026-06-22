@@ -763,6 +763,14 @@ INT_PTR CALLBACK SettingsProc (
 
 					_r_updown_setvalue (hwnd, IDC_LOGSIZELIMIT, _r_config_getulong (L"LogSizeLimitKb", LOG_SIZE_LIMIT_DEFAULT, NULL));
 
+					_r_ctrl_setacceleration (hwnd, IDC_LOGBUFFERLIMIT, 16);
+					_r_updown_setrange (hwnd, IDC_LOGBUFFERLIMIT, 4, 4096);
+					_r_updown_setvalue (hwnd, IDC_LOGBUFFERLIMIT, _r_config_getulong (L"LogBufferLimitKb", LOG_BUFFER_LIMIT_DEFAULT, NULL));
+
+					_r_ctrl_setacceleration (hwnd, IDC_LOGFLUSHTIMEOUT, 100);
+					_r_updown_setrange (hwnd, IDC_LOGFLUSHTIMEOUT, 100, 60000);
+					_r_updown_setvalue (hwnd, IDC_LOGFLUSHTIMEOUT, _r_config_getulong (L"LogFlushTimeoutMs", LOG_FLUSH_TIMEOUT_DEFAULT, NULL));
+
 					_r_ctrl_checkbutton (hwnd, IDC_ENABLEUILOG_CHK, _r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL));
 
 					_r_ctrl_sendcommand (hwnd, IDC_ENABLELOG_CHK, WM_APP);
@@ -1110,6 +1118,8 @@ INT_PTR CALLBACK SettingsProc (
 					_r_ctrl_setstring (hwnd, IDC_ENABLELOG_CHK, _r_locale_getstring (IDS_ENABLELOG_CHK));
 
 					_r_ctrl_setstring (hwnd, IDC_LOGSIZELIMIT_HINT, _r_locale_getstring (IDS_LOGSIZELIMIT_HINT));
+					_r_ctrl_setstring (hwnd, IDC_LOGBUFFERLIMIT_HINT, _r_locale_getstring (IDS_LOGBUFFERLIMIT_HINT));
+					_r_ctrl_setstring (hwnd, IDC_LOGFLUSHTIMEOUT_HINT, _r_locale_getstring (IDS_LOGFLUSHTIMEOUT_HINT));
 
 					_r_ctrl_setstringformat (
 						hwnd,
@@ -1192,6 +1202,18 @@ INT_PTR CALLBACK SettingsProc (
 				value = _r_updown_getvalue (hwnd, ctrl_id);
 
 				_r_config_setlong (L"LogSizeLimitKb", value, NULL);
+			}
+			else if (ctrl_id == IDC_LOGBUFFERLIMIT)
+			{
+				value = _r_updown_getvalue (hwnd, ctrl_id);
+
+				_r_config_setlong (L"LogBufferLimitKb", value, NULL);
+			}
+			else if (ctrl_id == IDC_LOGFLUSHTIMEOUT)
+			{
+				value = _r_updown_getvalue (hwnd, ctrl_id);
+
+				_r_config_setlong (L"LogFlushTimeoutMs", value, NULL);
 			}
 			else if (ctrl_id == IDC_NOTIFICATIONTIMEOUT)
 			{
@@ -1543,6 +1565,16 @@ INT_PTR CALLBACK SettingsProc (
 					if (hctrl)
 						_r_ctrl_enable (hctrl, 0, is_enabled);
 
+					hctrl = _r_updown_getbuddy (hwnd, IDC_LOGBUFFERLIMIT);
+
+					if (hctrl)
+						_r_ctrl_enable (hctrl, 0, is_enabled);
+
+					hctrl = _r_updown_getbuddy (hwnd, IDC_LOGFLUSHTIMEOUT);
+
+					if (hctrl)
+						_r_ctrl_enable (hctrl, 0, is_enabled);
+
 					break;
 				}
 
@@ -1697,15 +1729,32 @@ INT_PTR CALLBACK SettingsProc (
 				}
 
 				case IDC_LOGSIZELIMIT_CTRL:
+				case IDC_LOGBUFFERLIMIT_CTRL:
+				case IDC_LOGFLUSHTIMEOUT_CTRL:
 				{
 					LONG value;
 
 					if (notify_code != EN_KILLFOCUS)
 						break;
 
-					value = _r_updown_getvalue (hwnd, IDC_LOGSIZELIMIT);
+					if (ctrl_id == IDC_LOGSIZELIMIT_CTRL)
+					{
+						value = _r_updown_getvalue (hwnd, IDC_LOGSIZELIMIT);
 
-					_r_config_setlong (L"LogSizeLimitKb", value, NULL);
+						_r_config_setlong (L"LogSizeLimitKb", value, NULL);
+					}
+					else if (ctrl_id == IDC_LOGBUFFERLIMIT_CTRL)
+					{
+						value = _r_updown_getvalue (hwnd, IDC_LOGBUFFERLIMIT);
+
+						_r_config_setlong (L"LogBufferLimitKb", value, NULL);
+					}
+					else if (ctrl_id == IDC_LOGFLUSHTIMEOUT_CTRL)
+					{
+						value = _r_updown_getvalue (hwnd, IDC_LOGFLUSHTIMEOUT);
+
+						_r_config_setlong (L"LogFlushTimeoutMs", value, NULL);
+					}
 
 					break;
 				}
@@ -2068,6 +2117,7 @@ VOID _app_initialize (
 	_r_sys_setenvironment (&environment, THREAD_PRIORITY_BELOW_NORMAL, IoPriorityLow, MEMORY_PRIORITY_NORMAL);
 
 	_r_workqueue_initialize (&log_queue, 6, &environment, L"PacketsQueue");
+	_r_workqueue_initialize (&log_writer_queue, 1, &environment, L"LogWriterQueue");
 	_r_workqueue_initialize (&resolver_queue, 6, &environment, L"ResolverQueue");
 
 	_r_sys_setenvironment (&environment, THREAD_PRIORITY_HIGHEST, IoPriorityHigh, MEMORY_PRIORITY_NORMAL);
@@ -2374,7 +2424,7 @@ INT_PTR CALLBACK DlgProc (
 
 			if (_r_queuedlock_tryacquireexclusive (&lock_notify))
 			{
-				ptr_log = _r_obj_reference ((PITEM_LOG)lparam);
+				ptr_log = (PITEM_LOG)lparam;
 				hnotify = _app_notify_getwindow (ptr_log);
 
 				_r_queuedlock_releaseexclusive (&lock_notify);
@@ -2384,7 +2434,74 @@ INT_PTR CALLBACK DlgProc (
 				return (INT_PTR)hnotify;
 			}
 
+			if (lparam)
+				_r_obj_dereference ((PITEM_LOG)lparam);
+
 			return 0;
+		}
+
+		case WM_TIMER:
+		{
+			if (wparam == SEARCH_FILTER_TIMER_ID)
+			{
+				PITEM_TAB_CONTEXT tab_context;
+
+				KillTimer (hwnd, SEARCH_FILTER_TIMER_ID);
+
+				tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
+
+				if (tab_context)
+					_app_search_applyfilter (hwnd, tab_context->listview_id, config.search_string);
+
+				return 0;
+			}
+
+			break;
+		}
+
+		case WM_LOG_UPDATED:
+		{
+			_app_logwrite_ui_flush (hwnd);
+
+			break;
+		}
+
+		case WM_LISTVIEW_UPDATED:
+		{
+			_app_listview_updateby_id (hwnd, (INT)wparam, PR_UPDATE_TYPE);
+
+			break;
+		}
+
+		case WM_NETWORK_UPDATED:
+		{
+			PITEM_NETWORK_CONTEXT network_context;
+
+			network_context = _app_network_getcontext ();
+
+			if (network_context)
+			{
+				_InterlockedExchange (&network_context->is_update_queued, 0);
+
+				_app_network_printlistviewtable (network_context);
+			}
+
+			break;
+		}
+
+		case WM_LISTVIEW_REDRAW:
+		{
+			if (_r_wnd_isvisible (hwnd, FALSE))
+				_r_listview_redraw (hwnd, (INT)wparam);
+
+			break;
+		}
+
+		case WM_PACKAGE_UPDATED:
+		{
+			_app_package_rebuildlistview (hwnd, (ENUM_TYPE_DATA)wparam);
+
+			break;
 		}
 
 		case WM_CLOSE:
@@ -2586,6 +2703,8 @@ INT_PTR CALLBACK DlgProc (
 				{
 					PITEM_TAB_CONTEXT tab_context;
 					HWND hlistview;
+					BOOLEAN is_filter_changed;
+					ULONG update_flags;
 
 					tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
 
@@ -2597,9 +2716,14 @@ INT_PTR CALLBACK DlgProc (
 					if (!hlistview)
 						break;
 
-					_app_search_applyfilter (hwnd, tab_context->listview_id, config.search_string);
+					is_filter_changed = _app_search_applyfilter (hwnd, tab_context->listview_id, config.search_string);
 
-					_app_listview_updateby_id (hwnd, tab_context->listview_id, PR_UPDATE_FORCE | PR_UPDATE_NORESIZE);
+					update_flags = PR_UPDATE_FORCE | PR_UPDATE_NORESIZE;
+
+					if (is_filter_changed)
+						update_flags |= PR_UPDATE_NOREDRAW | PR_UPDATE_NOREFRESH | PR_UPDATE_NOSORT;
+
+					_app_listview_updateby_id (hwnd, tab_context->listview_id, update_flags);
 
 					ShowWindow (hlistview, SW_SHOWNA);
 
@@ -3068,7 +3192,10 @@ INT_PTR CALLBACK DlgProc (
 
 				_r_obj_movereference ((PVOID_PTR)&config.search_string, string);
 
-				_app_search_applyfilter (hwnd, tab_context->listview_id, string);
+				KillTimer (hwnd, SEARCH_FILTER_TIMER_ID);
+
+				if (!SetTimer (hwnd, SEARCH_FILTER_TIMER_ID, SEARCH_FILTER_DELAY, NULL))
+					_app_search_applyfilter (hwnd, tab_context->listview_id, config.search_string);
 
 				return 0;
 			}

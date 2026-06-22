@@ -7,6 +7,8 @@ typedef struct _ITEM_NETWORK_CONTEXT
 {
 	HWND hwnd;
 
+	volatile LONG is_update_queued;
+
 	R_QUEUED_LOCK lock_network;
 	R_QUEUED_LOCK lock_checker;
 

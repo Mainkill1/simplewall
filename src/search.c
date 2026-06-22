@@ -286,13 +286,27 @@ BOOLEAN _app_search_applyfiltercallback (
 )
 {
 	PITEM_LISTVIEW_CONTEXT context;
+	HWND hlistview;
 	INT item_count;
 	BOOLEAN is_changed = FALSE;
+	BOOLEAN is_redraw_locked = FALSE;
+
+	hlistview = GetDlgItem (hwnd, listview_id);
+
+	if (!hlistview)
+		return FALSE;
 
 	item_count = _r_listview_getitemcount (hwnd, listview_id);
 
 	if (!item_count)
 		return FALSE;
+
+	if (item_count > 128)
+	{
+		SendMessageW (hlistview, WM_SETREDRAW, FALSE, 0);
+
+		is_redraw_locked = TRUE;
+	}
 
 	for (INT i = 0; i < item_count; i++)
 	{
@@ -304,6 +318,9 @@ BOOLEAN _app_search_applyfiltercallback (
 		if (_app_search_applyfilteritem (hwnd, listview_id, i, context, search_string))
 			is_changed = TRUE;
 	}
+
+	if (is_redraw_locked)
+		SendMessageW (hlistview, WM_SETREDRAW, TRUE, 0);
 
 	if (is_changed)
 		_app_listview_updateby_id (hwnd, listview_id, PR_UPDATE_NOSETVIEW | PR_UPDATE_FORCE);
@@ -572,16 +589,19 @@ CleanupExit:
 	return is_changed;
 }
 
-VOID _app_search_applyfilter (
+BOOLEAN _app_search_applyfilter (
 	_In_ HWND hwnd,
 	_In_ INT listview_id,
 	_In_opt_ PR_STRING search_string
 )
 {
 	if (!((listview_id >= IDC_APPS_PROFILE && listview_id <= IDC_LOG) || listview_id == IDC_RULE_APPS_ID || listview_id == IDC_APP_RULES_ID))
-		return;
+		return FALSE;
 
-	_app_search_applyfiltercallback (hwnd, listview_id, search_string);
+	if (_r_obj_isstringempty (search_string))
+		search_string = NULL;
+
+	return _app_search_applyfiltercallback (hwnd, listview_id, search_string);
 }
 
 VOID _app_search_createbufferedcontext (

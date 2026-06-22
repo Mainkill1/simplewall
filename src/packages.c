@@ -277,10 +277,7 @@ VOID NTAPI _app_package_threadproc (
 	HANDLE event_handle1 = NULL;
 	HANDLE event_handle2 = NULL;
 	HANDLE hevents[2] = {0};
-	PITEM_APP ptr_app = NULL;
 	HWND hwnd;
-	LONG64 current_time;
-	ULONG_PTR enum_key = 0;
 	ULONG flags = REG_NOTIFY_CHANGE_NAME;
 	NTSTATUS status;
 
@@ -291,6 +288,8 @@ VOID NTAPI _app_package_threadproc (
 	if (!NT_SUCCESS (status))
 	{
 		_r_show_errormessage (hwnd, NULL, status, L"NtCreateEvent", ET_NATIVE);
+
+		NtClose (event_handle1);
 
 		return;
 	}
@@ -329,59 +328,19 @@ VOID NTAPI _app_package_threadproc (
 
 			if (status == STATUS_WAIT_0)
 			{
-				_r_listview_deleteallitems (hwnd, IDC_APPS_SERVICE);
-
 				_app_package_getserviceslist (hwnd);
 
-				// add apps
-				current_time = _r_unixtime_now ();
-
-				enum_key = 0;
-
-				_r_queuedlock_acquireshared (&lock_apps);
-
-				while (_r_obj_enumhashtablepointer (apps_table, (PVOID_PTR)&ptr_app, NULL, &enum_key))
-				{
-					if (ptr_app->type == DATA_APP_SERVICE)
-					{
-						_app_listview_addappitem (hwnd, ptr_app);
-
-						// install timer
-						if (ptr_app->timer)
-							_app_timer_set (hwnd, ptr_app, ptr_app->timer - current_time);
-					}
-				}
-
-				_r_queuedlock_releaseshared (&lock_apps);
+				if (hwnd)
+					PostMessageW (hwnd, WM_PACKAGE_UPDATED, DATA_APP_SERVICE, 0);
 
 				NtNotifyChangeKey (hservices_key, event_handle1, NULL, NULL, &isb, flags, TRUE, NULL, 0, TRUE); // reset
 			}
 			else if (status == STATUS_WAIT_1)
 			{
-				_r_listview_deleteallitems (hwnd, IDC_APPS_UWP);
-
 				_app_package_getpackageslist (hwnd);
 
-				// add apps
-				current_time = _r_unixtime_now ();
-
-				enum_key = 0;
-
-				_r_queuedlock_acquireshared (&lock_apps);
-
-				while (_r_obj_enumhashtablepointer (apps_table, (PVOID_PTR)&ptr_app, NULL, &enum_key))
-				{
-					if (ptr_app->type == DATA_APP_UWP)
-					{
-						_app_listview_addappitem (hwnd, ptr_app);
-
-						// install timer
-						if (ptr_app->timer)
-							_app_timer_set (hwnd, ptr_app, ptr_app->timer - current_time);
-					}
-				}
-
-				_r_queuedlock_releaseshared (&lock_apps);
+				if (hwnd)
+					PostMessageW (hwnd, WM_PACKAGE_UPDATED, DATA_APP_UWP, 0);
 
 				if (hpackages_key)
 					NtNotifyChangeKey (hpackages_key, event_handle2, NULL, NULL, &isb, flags, TRUE, NULL, 0, TRUE); // reset
@@ -401,6 +360,44 @@ VOID NTAPI _app_package_threadproc (
 
 	NtClose (event_handle1);
 	NtClose (event_handle2);
+}
+
+VOID _app_package_rebuildlistview (
+	_In_ HWND hwnd,
+	_In_ ENUM_TYPE_DATA type
+)
+{
+	PITEM_APP ptr_app = NULL;
+	LONG64 current_time;
+	ULONG_PTR enum_key = 0;
+	INT listview_id;
+
+	listview_id = _app_listview_getbytype (type);
+
+	if (!listview_id)
+		return;
+
+	_r_listview_deleteallitems (hwnd, listview_id);
+
+	current_time = _r_unixtime_now ();
+
+	_r_queuedlock_acquireshared (&lock_apps);
+
+	while (_r_obj_enumhashtablepointer (apps_table, (PVOID_PTR)&ptr_app, NULL, &enum_key))
+	{
+		if (ptr_app->type != type)
+			continue;
+
+		_app_listview_addappitem (hwnd, ptr_app);
+
+		// install timer
+		if (ptr_app->timer)
+			_app_timer_set (hwnd, ptr_app, ptr_app->timer - current_time);
+	}
+
+	_r_queuedlock_releaseshared (&lock_apps);
+
+	_app_listview_updateby_id (hwnd, type, PR_UPDATE_TYPE);
 }
 
 VOID _app_package_getpackageslist (

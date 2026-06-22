@@ -636,17 +636,17 @@ PR_STRING _app_getapppath (
 	if (ptr_app->type == DATA_APP_UWP || ptr_app->type == DATA_APP_SERVICE)
 	{
 		if (ptr_app->real_path)
-			path = _r_obj_reference (ptr_app->real_path);
+			_r_obj_movereference ((PVOID_PTR)&path, _r_obj_reference (ptr_app->real_path));
 
 		if (ptr_app->display_name)
-			path = _r_obj_reference (ptr_app->display_name);
+			_r_obj_movereference ((PVOID_PTR)&path, _r_obj_reference (ptr_app->display_name));
 	}
 
 	if (ptr_app->original_path)
-		path = _r_obj_reference (ptr_app->original_path);
+		_r_obj_movereference ((PVOID_PTR)&path, _r_obj_reference (ptr_app->original_path));
 
 	if (ptr_app->real_path)
-		path = _r_obj_reference (ptr_app->real_path);
+		_r_obj_movereference ((PVOID_PTR)&path, _r_obj_reference (ptr_app->real_path));
 
 	if (is_returnshort && path)
 	{
@@ -1168,9 +1168,14 @@ VOID _app_generate_rulescontrol (
 {
 	ITEM_STATUS status = {0};
 	WCHAR buffer[128];
+	PITEM_RULE menu_rules[2][2][RULES_MENU_LIMIT] = {0};
 	PITEM_RULE ptr_rule;
-	ULONG_PTR limit_group;
-	ULONG i;
+	ULONG_PTR rule_indices[2][2][RULES_MENU_LIMIT] = {0};
+	ULONG_PTR counts[2][2] = {0};
+	ULONG_PTR rules_count;
+	ULONG_PTR i;
+	INT enabled_id;
+	INT type_id;
 	BOOLEAN is_global;
 	BOOLEAN is_enabled;
 
@@ -1182,59 +1187,82 @@ VOID _app_generate_rulescontrol (
 	}
 	else
 	{
-		for (UINT8 type = 0; type < 2; type++)
+		_r_queuedlock_acquireshared (&lock_rules);
+
+		rules_count = _r_obj_getlistsize (rules_list);
+
+		for (i = 0; i < rules_count; i++)
 		{
-			if (type == 0)
+			ptr_rule = _r_obj_getlistitem (rules_list, i);
+
+			if (!ptr_rule || ptr_rule->type != DATA_RULE_USER)
+				continue;
+
+			is_global = (ptr_rule->is_enabled && _r_obj_isempty (ptr_rule->apps));
+
+			if (is_global)
+				continue;
+
+			if (ptr_rule->is_readonly)
 			{
 				if (!status.rules_predefined_count)
 					continue;
+
+				type_id = 0;
 			}
 			else
 			{
 				if (!status.rules_user_count)
 					continue;
+
+				type_id = 1;
 			}
+
+			is_enabled = (ptr_rule->is_enabled && (_r_obj_findhashtable (ptr_rule->apps, app_hash) != NULL));
+			enabled_id = is_enabled ? 1 : 0;
+
+			if (counts[type_id][enabled_id] >= RULES_MENU_LIMIT)
+				continue;
+
+			menu_rules[type_id][enabled_id][counts[type_id][enabled_id]] = _r_obj_reference (ptr_rule);
+			rule_indices[type_id][enabled_id][counts[type_id][enabled_id]] = i;
+
+			counts[type_id][enabled_id] += 1;
+		}
+
+		_r_queuedlock_releaseshared (&lock_rules);
+
+		for (UINT8 type = 0; type < 2; type++)
+		{
+			if ((type == 0 && !status.rules_predefined_count) || (type == 1 && !status.rules_user_count))
+				continue;
 
 			for (UINT8 loop = 0; loop < 2; loop++)
 			{
-				limit_group = 14; // limit rules
-
-				_r_queuedlock_acquireshared (&lock_rules);
-
-				for (i = 0; i < (ULONG)_r_obj_getlistsize (rules_list) && limit_group; i++)
+				for (ULONG_PTR j = 0; j < counts[type][loop]; j++)
 				{
-					ptr_rule = _r_obj_getlistitem (rules_list, i);
-
-					if (!ptr_rule)
-						continue;
-
-					is_global = (ptr_rule->is_enabled && _r_obj_isempty (ptr_rule->apps));
-					is_enabled = is_global || (ptr_rule->is_enabled && (_r_obj_findhashtable (ptr_rule->apps, app_hash)));
-
-					if (ptr_rule->type != DATA_RULE_USER)
-						continue;
-
-					if ((type == 0 && (!ptr_rule->is_readonly || is_global)) || (type == 1 && (ptr_rule->is_readonly || is_global)))
-						continue;
-
-					if ((loop == 0 && !is_enabled) || (loop == 1 && is_enabled))
-						continue;
+					ptr_rule = menu_rules[type][loop][j];
 
 					_r_str_printf (buffer, RTL_NUMBER_OF (buffer), _r_locale_getstring (IDS_RULE_APPLY_2), _r_obj_getstring (ptr_rule->name));
 
 					if (ptr_rule->is_readonly)
 						_r_str_append (buffer, RTL_NUMBER_OF (buffer), SZ_RULE_INTERNAL_MENU);
 
-					_r_menu_additem_ex (hsubmenu, IDX_RULES_SPECIAL + i, buffer, is_enabled ? MF_CHECKED : MF_UNCHECKED);
-
-					limit_group -= 1;
+					_r_menu_additem_ex (hsubmenu, IDX_RULES_SPECIAL + rule_indices[type][loop][j], buffer, loop ? MF_CHECKED : MF_UNCHECKED);
 				}
-
-				_r_queuedlock_releaseshared (&lock_rules);
 			}
 
 			if (!type)
 				_r_menu_addseparator (hsubmenu);
+		}
+
+		for (UINT8 type = 0; type < 2; type++)
+		{
+			for (UINT8 loop = 0; loop < 2; loop++)
+			{
+				for (ULONG_PTR j = 0; j < counts[type][loop]; j++)
+					_r_obj_dereference (menu_rules[type][loop][j]);
+			}
 		}
 
 		if (ptr_log)
@@ -1243,7 +1271,7 @@ VOID _app_generate_rulescontrol (
 
 			_r_str_printf (buffer, RTL_NUMBER_OF (buffer), _r_locale_getstring (IDS_RULE_APPLY_2), _r_obj_getstring (ptr_log->remote_addr_str));
 
-			_r_menu_additem (hsubmenu, (IDX_RULES_SPECIAL + i) + 1, buffer);
+			_r_menu_additem (hsubmenu, IDX_RULES_SPECIAL + rules_count, buffer);
 		}
 	}
 
@@ -1738,12 +1766,15 @@ VOID NTAPI _app_timercallback (
 )
 {
 	PITEM_APP ptr_app = NULL;
+	PR_LIST apps;
 	PR_STRING string;
 	ULONG_PTR enum_key;
 	NTSTATUS status;
 
 	while (TRUE)
 	{
+		apps = _r_obj_createlist (64, &_r_obj_dereference);
+
 		_r_queuedlock_acquireshared (&lock_apps);
 
 		enum_key = 0;
@@ -1755,6 +1786,15 @@ VOID NTAPI _app_timercallback (
 
 			if (!_app_isappused (ptr_app))
 				continue;
+
+			_r_obj_addlistitem (apps, _r_obj_reference (ptr_app), NULL);
+		}
+
+		_r_queuedlock_releaseshared (&lock_apps);
+
+		for (ULONG_PTR i = 0; i < _r_obj_getlistsize (apps); i++)
+		{
+			ptr_app = _r_obj_getlistitem (apps, i);
 
 			status = _r_crypt_getfilehash (&string, BCRYPT_SHA256_ALGORITHM, &ptr_app->real_path->sr, NULL);
 
@@ -1773,7 +1813,7 @@ VOID NTAPI _app_timercallback (
 			}
 		}
 
-		_r_queuedlock_releaseshared (&lock_apps);
+		_r_obj_dereference (apps);
 
 		_r_sys_waitforsingleobject (NtCurrentThread (), _r_calc_minutes2milliseconds (10));
 	}
@@ -1791,7 +1831,12 @@ VOID _app_getfileinformation (
 	ptr_app_info = _app_getappinfobyhash2 (app_hash);
 
 	if (_r_obj_isstringempty (path))
+	{
+		if (ptr_app_info)
+			_r_obj_dereference (ptr_app_info);
+
 		return;
+	}
 
 	if (ptr_app_info)
 	{
@@ -1821,7 +1866,13 @@ VOID _app_getfileinformation (
 
 	// check for binary path is valid
 	if (_app_isappvalidbinary (path))
+	{
 		_r_workqueue_queueitem (&file_queue, &_app_queue_fileinformation, ptr_app_info);
+	}
+	else
+	{
+		_r_obj_dereference (ptr_app_info);
+	}
 }
 
 VOID _app_queue_resolver (
@@ -1856,7 +1907,11 @@ VOID NTAPI _app_queue_fileinformation (
 	hwnd = _r_app_gethwnd ();
 
 	if (ptr_app_info->is_loaded)
+	{
+		_r_obj_dereference (ptr_app_info);
+
 		return;
+	}
 
 	status = _r_fs_openfile (&hfile, &ptr_app_info->path->sr, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE | FILE_SHARE_WRITE, 0, FALSE);
 
@@ -1864,6 +1919,8 @@ VOID NTAPI _app_queue_fileinformation (
 	{
 		if (status != STATUS_OBJECT_NAME_NOT_FOUND && status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_ACCESS_DENIED)
 			_r_log (LOG_LEVEL_ERROR, NULL, L"_r_fs_openfile", status, ptr_app_info->path->buffer);
+
+		_r_obj_dereference (ptr_app_info);
 
 		return;
 	}
@@ -1883,8 +1940,8 @@ VOID NTAPI _app_queue_fileinformation (
 		_app_getfilehashinfo (hfile, ptr_app_info->app_hash);
 
 	// redraw listview
-	if (_r_wnd_isvisible (hwnd, FALSE))
-		_r_listview_redraw (hwnd, ptr_app_info->listview_id);
+	if (hwnd)
+		PostMessageW (hwnd, WM_LISTVIEW_REDRAW, (WPARAM)ptr_app_info->listview_id, 0);
 
 	ptr_app_info->is_loaded = TRUE;
 
@@ -2070,8 +2127,8 @@ VOID NTAPI _app_queue_resolveinformation (
 	}
 
 	// redraw listview
-	if (_r_wnd_isvisible (context->hwnd, FALSE))
-		_r_listview_redraw (context->hwnd, context->listview_id);
+	if (context->hwnd)
+		PostMessageW (context->hwnd, WM_LISTVIEW_REDRAW, (WPARAM)context->listview_id, 0);
 
 	_r_obj_dereference (context->base_address);
 

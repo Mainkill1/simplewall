@@ -34,3 +34,8 @@ VOID _app_package_getpackageslist (
 VOID _app_package_getserviceslist (
 	_In_ HWND hwnd
 );
+
+VOID _app_package_rebuildlistview (
+	_In_ HWND hwnd,
+	_In_ ENUM_TYPE_DATA type
+);

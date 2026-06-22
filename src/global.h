@@ -57,6 +57,7 @@ DECLSPEC_SELECTANY R_QUEUED_LOCK lock_cache_resolution = PR_QUEUED_LOCK_INIT;
 
 DECLSPEC_SELECTANY R_WORKQUEUE file_queue = {0};
 DECLSPEC_SELECTANY R_WORKQUEUE log_queue = {0};
+DECLSPEC_SELECTANY R_WORKQUEUE log_writer_queue = {0};
 DECLSPEC_SELECTANY R_WORKQUEUE resolver_queue = {0};
 DECLSPEC_SELECTANY R_WORKQUEUE resolve_notify_queue = {0};
 DECLSPEC_SELECTANY R_WORKQUEUE wfp_queue = {0};
@@ -97,6 +98,11 @@ DECLSPEC_SELECTANY const LONG64 timer_array[] =
 #endif // !FWP_DIRECTION_FORWARD2
 
 #define WM_NOTIFICATION (WM_APP + 21)
+#define WM_LOG_UPDATED (WM_APP + 22)
+#define WM_LISTVIEW_UPDATED (WM_APP + 23)
+#define WM_NETWORK_UPDATED (WM_APP + 24)
+#define WM_LISTVIEW_REDRAW (WM_APP + 25)
+#define WM_PACKAGE_UPDATED (WM_APP + 26)
 
 #include "controls.h"
 #include "db.h"

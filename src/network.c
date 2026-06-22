@@ -758,7 +758,12 @@ VOID NTAPI _app_network_threadproc (
 	{
 		// update network table
 		_app_network_generatetable (network_context);
-		_app_network_printlistviewtable (network_context);
+
+		if (network_context->hwnd && _InterlockedCompareExchange (&network_context->is_update_queued, 1, 0) == 0)
+		{
+			if (!PostMessageW (network_context->hwnd, WM_NETWORK_UPDATED, 0, 0))
+				_InterlockedExchange (&network_context->is_update_queued, 0);
+		}
 
 		_r_sys_waitforsingleobject (NtCurrentThread (), 3000);
 	}

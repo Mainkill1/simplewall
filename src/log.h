@@ -82,6 +82,15 @@ VOID _app_logwrite_ui (
 	_In_ PITEM_LOG ptr_log
 );
 
+VOID _app_logwrite_ui_async (
+	_In_ HWND hwnd,
+	_In_ PITEM_LOG ptr_log
+);
+
+VOID _app_logwrite_ui_flush (
+	_In_ HWND hwnd
+);
+
 VOID _wfp_logsubscribe (
 	_In_opt_ HWND hwnd,
 	_In_ HANDLE engine_handle

@@ -277,3 +277,5 @@ NTSTATUS _app_profile_load (
 NTSTATUS _app_profile_save (
 	_In_opt_ HWND hwnd
 );
+
+VOID _app_profile_save_deferred ();

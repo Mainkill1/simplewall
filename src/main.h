@@ -83,6 +83,9 @@ typedef enum _ENUM_INFO_DATA2
 #define LOG_PATH_DEFAULT L"%USERPROFILE%\\" APP_NAME_SHORT L".log"
 #define LOG_VIEWER_DEFAULT L"%SystemRoot%\\notepad.exe"
 #define LOG_SIZE_LIMIT_DEFAULT _r_calc_kilobytes2bytes (1)
+#define LOG_BUFFER_LIMIT_DEFAULT 64 // kB
+#define LOG_FLUSH_TIMEOUT_DEFAULT 1000 // ms
+#define LOG_UI_FLUSH_BATCH 128
 
 #define PROC_WAITING_PID 0
 #define PROC_WAITING_NAME L"Waiting connections"
@@ -143,6 +146,9 @@ typedef enum _ENUM_INFO_DATA2
 #define NOTIFICATIONS_ID 4
 #define LOGGING_ID 5
 #define ERRLOG_ID 6
+#define SEARCH_FILTER_TIMER_ID 667
+#define SEARCH_FILTER_DELAY 150
+#define RULES_MENU_LIMIT 14
 
 #define REBAR_TOOLBAR_ID 0
 #define REBAR_SEARCH_ID 1
@@ -520,13 +526,13 @@ typedef struct _ITEM_LOG_CALLBACK
 {
 	union
 	{
-		const FWP_BYTE_ARRAY16 *remote_addr6;
+		FWP_BYTE_ARRAY16 remote_addr6;
 		ULONG_PTR remote_addr4;
 	} DUMMYUNIONNAME;
 
 	union
 	{
-		const FWP_BYTE_ARRAY16 *local_addr6;
+		FWP_BYTE_ARRAY16 local_addr6;
 		ULONG_PTR local_addr4;
 	} DUMMYUNIONNAME2;
 
@@ -537,6 +543,7 @@ typedef struct _ITEM_LOG_CALLBACK
 
 	UINT64 filter_id;
 
+	UINT32 app_id_length;
 	FWP_IP_VERSION version;
 
 	UINT32 flags;
