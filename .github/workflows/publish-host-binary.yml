@@ -1,0 +1,32 @@
+name: Publish host-verified Windows binary
+on:
+  push:
+    branches: [release/host-verified-3.9.2-fork.1]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Fetch the release payload
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Verify the tested binary and publish
+        run: |
+          cp .release/simplewall-3.9.2-fork.1-win64.zip .
+          unzip -q simplewall-3.9.2-fork.1-win64.zip -d payload
+          cp payload/simplewall.exe .
+          cp .release/SHA256SUMS.txt .
+          sha256sum -c SHA256SUMS.txt
+          gh release create v3.9.2-fork.1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 8a17a63b825d63c751ded48cc85fa26f21cd7f31 \
+            --title "simplewall 3.9.2-fork.1 (Windows x64)" \
+            --notes-file .release/notes.md \
+            simplewall.exe simplewall-3.9.2-fork.1-win64.zip SHA256SUMS.txt
