@@ -144,9 +144,23 @@ BOOLEAN _app_isapphavedrive (
 	_In_ INT letter
 );
 
+VOID _app_rulecache_invalidate ();
+
+VOID NTAPI _app_queue_refresh (
+	_In_ PVOID context
+);
+
 BOOLEAN _app_isapphaverule (
 	_In_ ULONG app_hash,
 	_In_ BOOLEAN is_countdisabled
+);
+
+BOOLEAN _app_isappexists_ui (
+	_In_ PITEM_APP ptr_app
+);
+
+VOID _app_getcount_ui (
+	_Out_ PITEM_STATUS status
 );
 
 BOOLEAN _app_isappexists (
@@ -268,6 +282,18 @@ VOID _app_profile_load_internal (
 NTSTATUS _app_profile_load (
 	_In_opt_ HWND hwnd,
 	_In_opt_ PR_STRING path_custom
+);
+
+VOID _app_profile_requestsave (
+	_In_opt_ HWND hwnd
+);
+
+VOID _app_profile_save_deferred (
+	_In_ HWND hwnd
+);
+
+VOID _app_profile_flushsave (
+	_In_ HWND hwnd
 );
 
 NTSTATUS _app_profile_save (

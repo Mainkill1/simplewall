@@ -6,6 +6,7 @@
 typedef struct _ITEM_LISTVIEW_CONTEXT
 {
 	ULONG_PTR id_code;
+	ULONG sort_index;
 
 	struct
 	{
@@ -24,6 +25,17 @@ typedef struct _ITEM_LISTVIEW_CONTEXT
 #define PR_UPDATE_NORESIZE 0x0010
 #define PR_UPDATE_NOREDRAW 0x0020
 #define PR_UPDATE_NOSETVIEW 0x0040
+#define PR_UPDATE_NOSTATUS 0x0080
+
+#define RM_LISTVIEW_REDRAW (WM_APP + 101)
+#define RM_LISTVIEW_UPDATE (WM_APP + 102)
+#define RM_LISTVIEW_SORT (WM_APP + 103)
+#define RM_PROFILE_SAVE (WM_APP + 104)
+#define RM_PROFILE_SAVE_ERROR (WM_APP + 105)
+#define RM_REFRESH_COMPLETE (WM_APP + 106)
+#define TIMER_SEARCH 0x535701
+#define TIMER_REDRAW 0x535702
+#define TIMER_PROFILE_SAVE 0x535703
 
 _Ret_maybenull_
 PITEM_TAB_CONTEXT _app_listview_getcontext (
@@ -131,6 +143,11 @@ VOID _app_listview_showitemby_param (
 	_In_ HWND hwnd,
 	_In_ ULONG_PTR lparam,
 	_In_ BOOLEAN is_app
+);
+
+VOID _app_listview_requestredraw (
+	_In_ HWND hwnd,
+	_In_ INT listview_id
 );
 
 VOID _app_listview_updateby_id (

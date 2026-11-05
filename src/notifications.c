@@ -113,7 +113,7 @@ BOOLEAN _app_notify_command (
 	_r_obj_dereference (ptr_app);
 	_r_obj_dereference (rules);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 
 	return TRUE;
 }
@@ -1208,9 +1208,11 @@ INT_PTR CALLBACK NotificationProc (
 						_app_ruleenable (ptr_rule, TRUE, FALSE);
 
 						_r_obj_addhashtableitem (ptr_rule->apps, app_hash, NULL);
+						_app_rulecache_invalidate ();
 
 						_r_queuedlock_acquireexclusive (&lock_rules);
 						_r_obj_addlistitem (rules_list, ptr_rule, &rule_idx);
+						_app_rulecache_invalidate ();
 						_r_queuedlock_releaseexclusive (&lock_rules);
 
 						if (hmain)
@@ -1219,7 +1221,7 @@ INT_PTR CALLBACK NotificationProc (
 							_app_listview_updateby_id (hmain, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE);
 						}
 
-						_app_profile_save (hwnd);
+						_app_profile_requestsave (hwnd);
 
 						_r_obj_dereference (rule);
 					}
@@ -1238,6 +1240,7 @@ INT_PTR CALLBACK NotificationProc (
 					if (is_remove)
 					{
 						_r_obj_removehashtableitem (ptr_rule->apps, app_hash);
+						_app_rulecache_invalidate ();
 
 						if (_r_obj_isempty (ptr_rule->apps))
 							_app_ruleenable (ptr_rule, FALSE, TRUE);
@@ -1245,6 +1248,7 @@ INT_PTR CALLBACK NotificationProc (
 					else
 					{
 						_r_obj_addhashtableitem (ptr_rule->apps, app_hash, NULL);
+						_app_rulecache_invalidate ();
 
 						_app_ruleenable (ptr_rule, TRUE, TRUE);
 					}
@@ -1272,7 +1276,7 @@ INT_PTR CALLBACK NotificationProc (
 					_r_obj_dereference (ptr_rule);
 					_r_obj_dereference (ptr_app);
 
-					_app_profile_save (hwnd);
+					_app_profile_requestsave (hwnd);
 				}
 
 				return FALSE;
@@ -1384,6 +1388,7 @@ INT_PTR CALLBACK NotificationProc (
 					ptr_rule = _app_addrule (rule_name, rule_string, NULL, ptr_log->direction, FWP_ACTION_PERMIT, ptr_log->protocol, ptr_log->af);
 
 					_r_obj_addhashtableitem (ptr_rule->apps, ptr_log->app_hash, NULL);
+					_app_rulecache_invalidate ();
 
 					_app_ruleenable (ptr_rule, TRUE, TRUE);
 
@@ -1393,6 +1398,7 @@ INT_PTR CALLBACK NotificationProc (
 					{
 						_r_queuedlock_acquireexclusive (&lock_rules);
 						_r_obj_addlistitem (rules_list, _r_obj_reference (ptr_rule), &rule_idx);
+						_app_rulecache_invalidate ();
 						_r_queuedlock_releaseexclusive (&lock_rules);
 
 						hmain = _r_app_gethwnd ();
@@ -1408,7 +1414,7 @@ INT_PTR CALLBACK NotificationProc (
 							_app_listview_updateby_id (hmain, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE);
 						}
 
-						_app_profile_save (hwnd);
+						_app_profile_requestsave (hwnd);
 
 						_app_editor_deletewindow (context);
 					}

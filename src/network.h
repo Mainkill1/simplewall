@@ -12,6 +12,7 @@ typedef struct _ITEM_NETWORK_CONTEXT
 
 	PR_HASHTABLE network_ptr;
 	PR_HASHTABLE checker_ptr;
+	PR_HASHTABLE connected_apps;
 
 	SW_UDP_STATS *udp_stats;
 

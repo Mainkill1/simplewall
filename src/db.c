@@ -339,6 +339,7 @@ VOID _app_db_parse_rule (
 	ptr_rule->is_forservice = _r_xml_getattribute_boolean (&db_info->xml_library, L"is_services");
 	ptr_rule->is_fordriver = _r_xml_getattribute_boolean (&db_info->xml_library, L"is_kernel");
 	ptr_rule->is_enabled = _r_xml_getattribute_boolean (&db_info->xml_library, L"is_enabled");
+	_app_rulecache_invalidate ();
 	ptr_rule->type = (type == DATA_RULE_SYSTEM_USER) ? DATA_RULE_USER : type;
 	ptr_rule->is_readonly = (type != DATA_RULE_USER);
 
@@ -378,7 +379,10 @@ VOID _app_db_parse_rule (
 		ptr_config = _app_getruleconfigitem (ptr_rule->rule_hash);
 
 		if (ptr_config)
+		{
 			ptr_rule->is_enabled = ptr_config->is_enabled;
+			_app_rulecache_invalidate ();
+		}
 	}
 
 	// load apps
@@ -444,6 +448,7 @@ VOID _app_db_parse_rule (
 				if (app_hash)
 				{
 					_r_obj_addhashtableitem (ptr_rule->apps, app_hash, NULL);
+					_app_rulecache_invalidate ();
 
 					if (ptr_rule->type == DATA_RULE_SYSTEM)
 						_app_setappinfobyhash (app_hash, INFO_IS_UNDELETABLE, LongToPtr (TRUE));
@@ -455,11 +460,15 @@ VOID _app_db_parse_rule (
 
 		// check if no app is added into rule, then disable it!
 		if (ptr_rule->is_enabled && _r_obj_isempty (ptr_rule->apps))
+		{
 			ptr_rule->is_enabled = FALSE;
+			_app_rulecache_invalidate ();
+		}
 	}
 
 	_r_queuedlock_acquireexclusive (&lock_rules);
 	_r_obj_addlistitem (rules_list, ptr_rule, NULL);
+	_app_rulecache_invalidate ();
 	_r_queuedlock_releaseexclusive (&lock_rules);
 
 	_r_obj_deletestringbuilder (&sb);
@@ -855,9 +864,8 @@ BOOLEAN _app_db_parse (
 }
 
 _Success_ (NT_SUCCESS (return))
-NTSTATUS _app_db_savetofile (
+NTSTATUS _app_db_savetostream (
 	_Inout_ PDB_INFORMATION db_info,
-	_In_ PR_STRING path,
 	_In_ ENUM_VERSION_XML version,
 	_In_ ENUM_TYPE_XML type,
 	_In_ LONG64 timestamp
@@ -886,6 +894,20 @@ NTSTATUS _app_db_savetofile (
 	_r_xml_writewhitespace (&db_info->xml_library, L"\r\n");
 	_r_xml_writeenddocument (&db_info->xml_library);
 
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS _app_db_savetofile (
+	_Inout_ PDB_INFORMATION db_info,
+	_In_ PR_STRING path,
+	_In_ ENUM_VERSION_XML version,
+	_In_ ENUM_TYPE_XML type,
+	_In_ LONG64 timestamp
+)
+{
+	NTSTATUS status = _app_db_savetostream (db_info, version, type, timestamp);
+	if (!NT_SUCCESS (status))
+		return status;
 	return _app_db_save_streamtofile (db_info, path);
 }
 

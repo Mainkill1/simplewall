@@ -162,6 +162,13 @@ VOID _app_db_parse_ruleconfig (
 );
 
 _Success_ (NT_SUCCESS (return))
+NTSTATUS _app_db_savetostream (
+	_Inout_ PDB_INFORMATION db_info,
+	_In_ ENUM_VERSION_XML version,
+	_In_ ENUM_TYPE_XML type,
+	_In_ LONG64 timestamp
+);
+
 NTSTATUS _app_db_savetofile (
 	_Inout_ PDB_INFORMATION db_info,
 	_In_ PR_STRING path,

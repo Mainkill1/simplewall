@@ -5,6 +5,13 @@
 
 EXTERN_C const IID IID_IImageList2;
 
+VOID _app_toolbar_setchecked (
+	_In_ HWND hwnd,
+	_In_ INT ctrl_id,
+	_In_ UINT command_id,
+	_In_ BOOLEAN is_checked
+);
+
 _Ret_maybenull_
 PR_STRING _app_gettooltipbylparam (
 	_In_ HWND hwnd,

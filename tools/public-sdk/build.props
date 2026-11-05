@@ -1,0 +1,13 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <IncludePath>$(PublicRoutineRoot)\src;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Remove="..\routine\src\routine.c;..\routine\src\rapp.c" />
+    <ClCompile Include="$(PublicRoutineRoot)\src\routine.c" />
+    <ClCompile Include="$(PublicRoutineRoot)\src\rapp.c" />
+    <ClCompile Update="src\*.c;src\uwp.cpp">
+      <ForcedIncludeFiles>$(MSBuildThisFileDirectory)routine-compat.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+    </ClCompile>
+  </ItemGroup>
+</Project>

@@ -427,6 +427,12 @@ VOID _app_listview_updateby_id (
 	ENUM_TYPE_DATA type;
 	INT listview_id;
 
+	if (GetWindowThreadProcessId (hwnd, NULL) != GetCurrentThreadId ())
+	{
+		PostMessageW (hwnd, RM_LISTVIEW_UPDATE, (WPARAM)lparam, flags);
+		return;
+	}
+
 	tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
 
 	if (!tab_context)
@@ -467,7 +473,8 @@ VOID _app_listview_updateby_id (
 			_app_listview_resize (hwnd, listview_id, FALSE);
 	}
 
-	_app_refreshstatus (hwnd);
+	if (!(flags & PR_UPDATE_NOSTATUS))
+		_app_refreshstatus (hwnd);
 }
 
 VOID _app_listview_updateby_param (
@@ -876,157 +883,49 @@ VOID _app_listview_setview (
 	_r_listview_setview (hwnd, listview_id, view_type);
 }
 
+typedef struct _APP_SORT_KEY
+{
+	PR_STRING text;
+	LONG64 value;
+	BOOLEAN has_value;
+	BOOLEAN is_checked;
+} APP_SORT_KEY, *PAPP_SORT_KEY;
+
+typedef struct _APP_SORT_CONTEXT
+{
+	PAPP_SORT_KEY keys;
+	BOOLEAN is_descend;
+} APP_SORT_CONTEXT, *PAPP_SORT_CONTEXT;
+
 INT CALLBACK _app_listview_compare_callback (
 	_In_ LPARAM lparam1,
 	_In_ LPARAM lparam2,
 	_In_ LPARAM lparam
 )
 {
-	PR_STRING item_text_1, item_text_2;
-	PITEM_LOG ptr_log1, ptr_log2;
-	PITEM_NETWORK ptr_network1, ptr_network2;
-	WCHAR section_name[0x80];
-	HWND hwnd;
-	LONG64 timestamp1 = 0, timestamp2 = 0;
-	LONG64 value1 = 0, value2 = 0;
-	ULONG context1, context2;
-	LONG column_id;
-	INT item_id1, item_id2, listview_id, result = 0;
-	BOOLEAN is_checked1, is_checked2, is_descend;
+	PAPP_SORT_CONTEXT sort = (PAPP_SORT_CONTEXT)lparam;
+	PITEM_LISTVIEW_CONTEXT item1 = (PITEM_LISTVIEW_CONTEXT)lparam1;
+	PITEM_LISTVIEW_CONTEXT item2 = (PITEM_LISTVIEW_CONTEXT)lparam2;
+	PAPP_SORT_KEY key1, key2;
+	INT result = 0;
 
-	hwnd = GetParent ((HWND)lparam);
-
-	if (!hwnd)
+	if (!item1 || !item2)
 		return 0;
 
-	listview_id = GetDlgCtrlID ((HWND)lparam);
+	key1 = &sort->keys[item1->sort_index];
+	key2 = &sort->keys[item2->sort_index];
 
-	if (!listview_id)
-		return 0;
+	// Checked rows stay first in both sort directions, matching existing behavior.
+	if (key1->is_checked != key2->is_checked)
+		return key1->is_checked ? -1 : 1;
 
-	item_id1 = (INT)(INT_PTR)lparam1;
-	item_id2 = (INT)(INT_PTR)lparam2;
+	if (key1->has_value && key2->has_value)
+		result = (key1->value > key2->value) - (key1->value < key2->value);
 
-	_r_str_printf (section_name, RTL_NUMBER_OF (section_name), L"listview\\%04" TEXT (PRIX32), listview_id);
+	if (!result && key1->text && key2->text)
+		result = _r_str_compare_logical (key1->text->buffer, key2->text->buffer);
 
-	is_descend = _r_config_getboolean (L"SortIsDescending", FALSE, section_name);
-	column_id = _r_config_getlong (L"SortColumn", 0, section_name);
-
-	if ((_r_listview_getstyle_ex (hwnd, listview_id) & LVS_EX_CHECKBOXES) != 0)
-	{
-		is_checked1 = _r_listview_isitemchecked (hwnd, listview_id, item_id1);
-		is_checked2 = _r_listview_isitemchecked (hwnd, listview_id, item_id2);
-
-		if (is_checked1 != is_checked2)
-		{
-			if (is_checked1 && !is_checked2)
-			{
-				result = is_descend ? 1 : -1;
-			}
-			else if (!is_checked1 && is_checked2)
-			{
-				result = is_descend ? -1 : 1;
-			}
-		}
-	}
-
-	context1 = (ULONG)_app_listview_getitemcontext (hwnd, listview_id, item_id1);
-	context2 = (ULONG)_app_listview_getitemcontext (hwnd, listview_id, item_id2);
-
-	if (!result)
-	{
-		// timestamp sorting
-		if ((listview_id >= IDC_APPS_PROFILE && listview_id <= IDC_APPS_UWP) && column_id == 1)
-		{
-			if (_app_getappinfobyhash (context1, INFO_TIMESTAMP, &timestamp1, sizeof (LONG64)) &&
-				_app_getappinfobyhash (context2, INFO_TIMESTAMP, &timestamp2, sizeof (LONG64)))
-			{
-				if (timestamp1 < timestamp2)
-				{
-					result = -1;
-				}
-				else if (timestamp1 > timestamp2)
-				{
-					result = 1;
-				}
-			}
-		}
-		else if (listview_id == IDC_LOG && column_id == 1)
-		{
-			ptr_log1 = _app_getlogitem (context1);
-			ptr_log2 = _app_getlogitem (context2);
-
-			if (ptr_log1 && ptr_log2)
-			{
-				if (ptr_log1->timestamp < ptr_log2->timestamp)
-				{
-					result = -1;
-				}
-				else if (ptr_log1->timestamp > ptr_log2->timestamp)
-				{
-					result = 1;
-				}
-			}
-
-			if (ptr_log1)
-				_r_obj_dereference (ptr_log1);
-
-			if (ptr_log2)
-				_r_obj_dereference (ptr_log2);
-		}
-		else if (listview_id == IDC_NETWORK && column_id >= 9 && column_id <= 11)
-		{
-			ptr_network1 = _app_network_getitem (context1);
-			ptr_network2 = _app_network_getitem (context2);
-
-			if (ptr_network1 && ptr_network2)
-			{
-				if (column_id == 9)
-				{
-					value1 = _InterlockedCompareExchange64 (&ptr_network1->download_speed, 0, 0);
-					value2 = _InterlockedCompareExchange64 (&ptr_network2->download_speed, 0, 0);
-				}
-				else if (column_id == 10)
-				{
-					value1 = _InterlockedCompareExchange64 (&ptr_network1->upload_speed, 0, 0);
-					value2 = _InterlockedCompareExchange64 (&ptr_network2->upload_speed, 0, 0);
-				}
-				else
-				{
-					value1 = _InterlockedCompareExchange64 (&ptr_network1->download_total, 0, 0) + _InterlockedCompareExchange64 (&ptr_network1->upload_total, 0, 0);
-					value2 = _InterlockedCompareExchange64 (&ptr_network2->download_total, 0, 0) + _InterlockedCompareExchange64 (&ptr_network2->upload_total, 0, 0);
-				}
-
-				if (value1 < value2)
-					result = -1;
-				else if (value1 > value2)
-					result = 1;
-			}
-
-			if (ptr_network1)
-				_r_obj_dereference (ptr_network1);
-
-			if (ptr_network2)
-				_r_obj_dereference (ptr_network2);
-		}
-	}
-
-	if (!result)
-	{
-		item_text_1 = _r_listview_getitemtext (hwnd, listview_id, item_id1, column_id);
-		item_text_2 = _r_listview_getitemtext (hwnd, listview_id, item_id2, column_id);
-
-		if (item_text_1 && item_text_2)
-			result = _r_str_compare_logical (item_text_1->buffer, item_text_2->buffer);
-
-		if (item_text_1)
-			_r_obj_dereference (item_text_1);
-
-		if (item_text_2)
-			_r_obj_dereference (item_text_2);
-	}
-
-	return is_descend ? -result : result;
+	return sort->is_descend ? -result : result;
 }
 
 VOID _app_listview_sort (
@@ -1037,9 +936,21 @@ VOID _app_listview_sort (
 )
 {
 	WCHAR config_name[0x80];
+	APP_SORT_CONTEXT sort;
+	PITEM_LISTVIEW_CONTEXT context;
+	PITEM_NETWORK ptr_network;
+	PITEM_LOG ptr_log;
+	PAPP_SORT_KEY key;
 	HWND hlistview;
-	INT column_count;
-	BOOLEAN is_descend;
+	INT column_count, item_count;
+	ULONG app_hash;
+	BOOLEAN is_descend, has_checkboxes;
+
+	if (GetWindowThreadProcessId (hwnd, NULL) != GetCurrentThreadId ())
+	{
+		PostMessageW (hwnd, RM_LISTVIEW_SORT, listview_id, 0);
+		return;
+	}
 
 	hlistview = GetDlgItem (hwnd, listview_id);
 
@@ -1078,5 +989,76 @@ VOID _app_listview_sort (
 
 	_r_listview_setcolumnsortindex (hwnd, listview_id, column_id, is_descend ? -1 : 1);
 
-	_r_listview_sort (hwnd, listview_id, &_app_listview_compare_callback, (WPARAM)hlistview);
+	item_count = _r_listview_getitemcount (hwnd, listview_id);
+	if (item_count < 2)
+		return;
+
+	sort.keys = (PAPP_SORT_KEY)_r_mem_allocate (sizeof (APP_SORT_KEY) * item_count);
+	sort.is_descend = is_descend;
+	has_checkboxes = (_r_listview_getstyle_ex (hwnd, listview_id) & LVS_EX_CHECKBOXES) != 0;
+
+	for (INT i = 0; i < item_count; i++)
+	{
+		key = &sort.keys[i];
+		context = (PITEM_LISTVIEW_CONTEXT)_r_listview_getitemlparam (hwnd, listview_id, i);
+		if (!context)
+			continue;
+
+		context->sort_index = i;
+		app_hash = (ULONG)context->id_code;
+		key->is_checked = has_checkboxes && _r_listview_isitemchecked (hwnd, listview_id, i);
+		key->text = _r_listview_getitemtext (hwnd, listview_id, i, column_id);
+
+		if ((listview_id >= IDC_APPS_PROFILE && listview_id <= IDC_APPS_UWP) && column_id == 1)
+		{
+			key->has_value = _app_getappinfobyhash (app_hash, INFO_TIMESTAMP, &key->value, sizeof (LONG64));
+		}
+		else if (listview_id == IDC_LOG && column_id == 1)
+		{
+			ptr_log = _app_getlogitem (app_hash);
+			if (ptr_log)
+			{
+				key->value = ptr_log->timestamp;
+				key->has_value = TRUE;
+				_r_obj_dereference (ptr_log);
+			}
+		}
+		else if (listview_id == IDC_NETWORK && column_id >= 9 && column_id <= 11)
+		{
+			ptr_network = _app_network_getitem (app_hash);
+			if (ptr_network)
+			{
+				if (column_id == 9)
+					key->value = _InterlockedCompareExchange64 (&ptr_network->download_speed, 0, 0);
+				else if (column_id == 10)
+					key->value = _InterlockedCompareExchange64 (&ptr_network->upload_speed, 0, 0);
+				else
+					key->value = _InterlockedCompareExchange64 (&ptr_network->download_total, 0, 0) + _InterlockedCompareExchange64 (&ptr_network->upload_total, 0, 0);
+				key->has_value = TRUE;
+				_r_obj_dereference (ptr_network);
+			}
+		}
+	}
+
+	// LVM_SORTITEMS compares stable row contexts, never moving row indexes.
+	SendMessageW (hlistview, LVM_SORTITEMS, (WPARAM)&sort, (LPARAM)&_app_listview_compare_callback);
+
+	for (INT i = 0; i < item_count; i++)
+	{
+		if (sort.keys[i].text)
+			_r_obj_dereference (sort.keys[i].text);
+	}
+	_r_mem_free (sort.keys);
+}
+
+VOID _app_listview_requestredraw (
+	_In_ HWND hwnd,
+	_In_ INT listview_id
+)
+{
+	if (listview_id >= IDC_APPS_PROFILE && listview_id <= IDC_LOG)
+	{
+		if (InterlockedOr (&config.redraw_pending, 1L << (listview_id - IDC_APPS_PROFILE)) == 0)
+			PostMessageW (hwnd, RM_LISTVIEW_REDRAW, 0, 0);
+	}
 }

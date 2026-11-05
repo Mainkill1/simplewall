@@ -1182,12 +1182,14 @@ BOOLEAN _app_setruletoapp (
 	if (is_enable)
 	{
 		_r_obj_addhashtableitem (ptr_rule->apps, ptr_app->app_hash, NULL);
+		_app_rulecache_invalidate ();
 
 		_app_ruleenable (ptr_rule, TRUE, TRUE);
 	}
 	else
 	{
 		_r_obj_removehashtableitem (ptr_rule->apps, ptr_app->app_hash);
+		_app_rulecache_invalidate ();
 
 		if (_r_obj_isempty (ptr_rule->apps))
 			_app_ruleenable (ptr_rule, FALSE, TRUE);
@@ -1666,44 +1668,31 @@ VOID _app_getfileinformation (
 )
 {
 	PITEM_APP_INFO ptr_app_info;
+	LONG state;
 
-	if (_r_obj_isstringempty (path))
+	if (_r_obj_isstringempty (path) || !_app_isappvalidbinary (path))
 		return;
 
-	ptr_app_info = _app_getappinfobyhash2 (app_hash);
-
-	if (ptr_app_info)
-	{
-		// all information are already set!
-		if (ptr_app_info->is_loaded)
-		{
-			_r_obj_dereference (ptr_app_info);
-			return;
-		}
-	}
-	else
+	_r_queuedlock_acquireexclusive (&lock_cache_information);
+	ptr_app_info = (PITEM_APP_INFO)_r_obj_findhashtablepointer (cache_information, app_hash);
+	if (!ptr_app_info)
 	{
 		ptr_app_info = (PITEM_APP_INFO)_r_obj_allocate (sizeof (ITEM_APP_INFO), &_app_dereferenceappinfo);
-
 		ptr_app_info->path = _r_obj_reference (path);
 		ptr_app_info->app_hash = app_hash;
 		ptr_app_info->type = type;
 		ptr_app_info->listview_id = listview_id;
-
-		_r_queuedlock_acquireexclusive (&lock_cache_information);
 		_r_obj_addhashtablepointer (cache_information, app_hash, _r_obj_reference (ptr_app_info));
-		_r_queuedlock_releaseexclusive (&lock_cache_information);
 	}
+	_r_queuedlock_releaseexclusive (&lock_cache_information);
 
-	// check for binary path is valid
-	if (_app_isappvalidbinary (path))
-	{
+	state = InterlockedCompareExchange (&ptr_app_info->load_state, 0, 0);
+	if ((state == 0 || (state == 2 && !ptr_app_info->is_loaded &&
+		_r_sys_gettickcount64 () >= (ULONG64)_InterlockedCompareExchange64 (&ptr_app_info->retry_after, 0, 0))) &&
+		InterlockedCompareExchange (&ptr_app_info->load_state, 1, state) == state)
 		_r_workqueue_queueitem (&file_queue, &_app_queue_fileinformation, ptr_app_info);
-	}
 	else
-	{
-		_r_obj_dereference (ptr_app_info); // cleanup!
-	}
+		_r_obj_dereference (ptr_app_info);
 }
 
 VOID _app_queue_resolver (
@@ -1730,14 +1719,14 @@ VOID NTAPI _app_queue_fileinformation (
 )
 {
 	PITEM_APP_INFO ptr_app_info;
-	HANDLE hfile;
+	HANDLE hfile = NULL;
 	HWND hwnd;
 	NTSTATUS status;
 
 	ptr_app_info = (PITEM_APP_INFO)arglist;
 
 	if (ptr_app_info->is_loaded)
-		return;
+		goto CleanupExit;
 
 	hwnd = _r_app_gethwnd ();
 
@@ -1748,7 +1737,7 @@ VOID NTAPI _app_queue_fileinformation (
 		if (status != STATUS_OBJECT_NAME_NOT_FOUND && status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_ACCESS_DENIED)
 			_r_log (LOG_LEVEL_ERROR, NULL, L"_r_fs_openfile", ptr_app_info->path->buffer, status);
 
-		return;
+		goto CleanupExit;
 	}
 
 	// query app icon
@@ -1767,13 +1756,18 @@ VOID NTAPI _app_queue_fileinformation (
 
 	// redraw listview
 	if (hwnd && _r_wnd_isvisible (hwnd, FALSE) && ptr_app_info->listview_id != 0)
-		_r_listview_redraw (hwnd, ptr_app_info->listview_id);
+		_app_listview_requestredraw (hwnd, ptr_app_info->listview_id);
 
 	ptr_app_info->is_loaded = TRUE;
 
+CleanupExit:
+
+	_InterlockedExchange64 (&ptr_app_info->retry_after, (LONG64)_r_sys_gettickcount64 () + 30000);
+	InterlockedExchange (&ptr_app_info->load_state, 2);
 	_r_obj_dereference (ptr_app_info);
 
-	NtClose (hfile);
+	if (hfile)
+		NtClose (hfile);
 }
 
 VOID NTAPI _app_queue_notifyinformation (

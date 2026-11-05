@@ -213,6 +213,10 @@ typedef struct _STATIC_DATA
 	volatile HANDLE hnetevent;
 	volatile HANDLE hlogfile;
 	volatile LONG log_id;
+	volatile LONG redraw_pending;
+	volatile LONG save_pending;
+	volatile LONG refresh_pending;
+	BOOLEAN save_timer_armed;
 
 	ULONG color_nonremovable;
 	ULONG color_network;
@@ -312,6 +316,10 @@ typedef struct _ITEM_APP
 
 	ULONG app_hash;
 
+	volatile LONG exists_state; // 0=unknown, 1=exists, 2=missing (UI cache only)
+	volatile LONG exists_pending;
+	volatile LONG64 exists_checked;
+
 	ENUM_TYPE_DATA type;
 
 	UINT8 profile; // reserved ffu!
@@ -338,6 +346,8 @@ typedef struct _ITEM_APP_INFO
 	INT listview_id;
 
 	BOOLEAN is_loaded;
+	volatile LONG load_state; // 0=new, 1=queued/loading, 2=complete (including failure)
+	volatile LONG64 retry_after;
 } ITEM_APP_INFO, *PITEM_APP_INFO;
 
 typedef struct _ITEM_FILTER_CONFIG

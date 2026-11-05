@@ -172,6 +172,7 @@ PITEM_NETWORK_CONTEXT _app_network_getcontext ()
 
 		network_context->network_ptr = _r_obj_createhashtablepointer (0x100);
 		network_context->checker_ptr = _r_obj_createhashtablepointer (0x100);
+		network_context->connected_apps = _r_obj_createhashtable (sizeof (ULONG), 0x100, NULL);
 
 		_r_initonce_end (&init_once);
 	}
@@ -774,33 +775,15 @@ BOOLEAN _app_network_isapphaveconnection (
 	_In_ ULONG app_hash
 )
 {
-	PITEM_NETWORK_CONTEXT network_context;
-	PITEM_NETWORK ptr_network = NULL;
-	ULONG_PTR enum_key = 0;
-
-	network_context = _app_network_getcontext ();
+	PITEM_NETWORK_CONTEXT network_context = _app_network_getcontext ();
+	BOOLEAN result;
 
 	if (!network_context)
 		return FALSE;
-
 	_r_queuedlock_acquireshared (&network_context->lock_network);
-
-	while (_r_obj_enumhashtablepointer (network_context->network_ptr, (PVOID_PTR)&ptr_network, NULL, &enum_key))
-	{
-		if (ptr_network->app_hash != app_hash)
-			continue;
-
-		if (ptr_network->is_connection)
-		{
-			_r_queuedlock_releaseshared (&network_context->lock_network);
-
-			return TRUE;
-		}
-	}
-
+	result = _r_obj_findhashtable (network_context->connected_apps, app_hash) != NULL;
 	_r_queuedlock_releaseshared (&network_context->lock_network);
-
-	return FALSE;
+	return result;
 }
 
 BOOLEAN _app_network_isitemfound (
@@ -869,10 +852,11 @@ VOID _app_network_printlistviewtable (
 {
 	PITEM_NETWORK ptr_network = NULL;
 	PR_STRING string;
+	PR_HASHTABLE connected_apps, previous_apps;
 	ULONG_PTR enum_key = 0;
-	ULONG app_hash, network_hash;
+	ULONG network_hash;
 	INT item_count;
-	BOOLEAN is_highlight = FALSE, is_refresh = FALSE;
+	BOOLEAN is_highlight = FALSE, is_refresh = FALSE, is_highlight_changed = FALSE;
 
 	if (_r_config_getboolean (L"IsEnableHighlighting", TRUE, NULL) && _r_config_getboolean (L"IsHighlightConnection", TRUE, L"colors"))
 		is_highlight = TRUE;
@@ -905,19 +889,16 @@ VOID _app_network_printlistviewtable (
 	// refresh network tab (traffic counters change on every pass)
 	if (is_refresh)
 	{
-		_app_listview_updateby_id (network_context->hwnd, IDC_NETWORK, PR_UPDATE_NORESIZE);
+		_app_listview_updateby_id (network_context->hwnd, IDC_NETWORK, PR_UPDATE_NORESIZE | PR_UPDATE_NOSTATUS);
 	}
 	else
 	{
-		_r_listview_redraw (network_context->hwnd, IDC_NETWORK);
+		_app_listview_requestredraw (network_context->hwnd, IDC_NETWORK);
 		_app_listview_sort (network_context->hwnd, IDC_NETWORK, INT_ERROR, FALSE);
 	}
 
 	// remove closed connections from list
 	item_count = _r_listview_getitemcount (network_context->hwnd, IDC_NETWORK);
-
-	if (!item_count)
-		return;
 
 	for (INT i = item_count - 1; i != INT_ERROR; i--)
 	{
@@ -928,12 +909,33 @@ VOID _app_network_printlistviewtable (
 
 		_r_listview_deleteitem (network_context->hwnd, IDC_NETWORK, i);
 
-		app_hash = _app_network_getappitem (network_hash);
 
 		_app_network_removeitem (network_hash);
+	}
 
-		if (app_hash && is_highlight)
-			_app_listview_updateby_param (network_context->hwnd, app_hash, PR_SETITEM_REDRAW, TRUE); // redraw listview item
+	enum_key = 0;
+	connected_apps = _r_obj_createhashtable (sizeof (ULONG), 0x100, NULL);
+	_r_queuedlock_acquireexclusive (&network_context->lock_network);
+	while (_r_obj_enumhashtablepointer (network_context->network_ptr, (PVOID_PTR)&ptr_network, NULL, &enum_key))
+	{
+		if (ptr_network->app_hash && ptr_network->is_connection)
+		{
+			_r_obj_addhashtableitem (connected_apps, ptr_network->app_hash, NULL);
+			if (!_r_obj_findhashtable (network_context->connected_apps, ptr_network->app_hash))
+				is_highlight_changed = TRUE;
+		}
+	}
+	previous_apps = network_context->connected_apps;
+	if (_r_obj_gethashtablesize (connected_apps) != _r_obj_gethashtablesize (previous_apps))
+		is_highlight_changed = TRUE;
+	network_context->connected_apps = connected_apps;
+	_r_queuedlock_releaseexclusive (&network_context->lock_network);
+	_r_obj_dereference (previous_apps);
+
+	if (is_highlight && is_highlight_changed)
+	{
+		for (INT i = IDC_APPS_PROFILE; i <= IDC_APPS_UWP; i++)
+			_app_listview_requestredraw (network_context->hwnd, i);
 	}
 }
 

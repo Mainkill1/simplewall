@@ -35,7 +35,7 @@ BOOLEAN _app_changefilters (
 
 	_r_listview_redraw (hwnd, tab_context->listview_id);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 
 	return FALSE;
 }
@@ -418,7 +418,7 @@ VOID _app_config_apply (
 			if (hmenu)
 				_r_menu_checkitem (hmenu, IDM_PROFILETYPE_PLAIN, IDM_PROFILETYPE_ENCRYPTED, MF_BYCOMMAND, IDM_PROFILETYPE_PLAIN);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 
 			break;
 		}
@@ -430,7 +430,7 @@ VOID _app_config_apply (
 			if (hmenu)
 				_r_menu_checkitem (hmenu, IDM_PROFILETYPE_PLAIN, IDM_PROFILETYPE_ENCRYPTED, MF_BYCOMMAND, IDM_PROFILETYPE_COMPRESSED);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 
 			break;
 		}
@@ -442,7 +442,7 @@ VOID _app_config_apply (
 			if (hmenu)
 				_r_menu_checkitem (hmenu, IDM_PROFILETYPE_PLAIN, IDM_PROFILETYPE_ENCRYPTED, MF_BYCOMMAND, IDM_PROFILETYPE_ENCRYPTED);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 
 			break;
 		}
@@ -1344,7 +1344,7 @@ INT_PTR CALLBACK SettingsProc (
 						_app_loginit (is_enabled);
 					}
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLELOG_CHK, is_enabled);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLELOG_CHK, is_enabled);
 
 					_r_ctrl_enable (hwnd, IDC_LOGPATH, is_enabled); // input
 					_r_ctrl_enable (hwnd, IDC_LOGPATH_BTN, is_enabled); // button
@@ -1363,7 +1363,7 @@ INT_PTR CALLBACK SettingsProc (
 
 					_r_config_setboolean (L"IsLogUiEnabled", is_enabled, NULL);
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, is_enabled);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, is_enabled);
 
 					break;
 				}
@@ -1518,7 +1518,7 @@ INT_PTR CALLBACK SettingsProc (
 					if (!is_postmessage)
 						_r_config_setboolean (L"IsNotificationsEnabled", is_enabled, NULL);
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLENOTIFICATIONS_CHK, is_enabled);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLENOTIFICATIONS_CHK, is_enabled);
 
 					_r_ctrl_enable (hwnd, IDC_NOTIFICATIONSOUND_CHK, is_enabled);
 					_r_ctrl_enable (hwnd, IDC_NOTIFICATIONONTRAY_CHK, is_enabled);
@@ -1844,11 +1844,14 @@ VOID _app_initialize (
 	_r_sys_setenvironment (&environment, THREAD_PRIORITY_ABOVE_NORMAL, IoPriorityHigh, MEMORY_PRIORITY_NORMAL);
 
 	_r_workqueue_initialize (&file_queue, 12, &environment, L"FilesQueue");
+	_r_workqueue_initialize (&profile_queue, 1, &environment, L"ProfileQueue");
+	profile_write_event = CreateEventW (NULL, FALSE, FALSE, NULL);
 	_r_workqueue_initialize (&resolve_notify_queue, 2, &environment, L"NotificationQueue");
 
 	_r_sys_setenvironment (&environment, THREAD_PRIORITY_BELOW_NORMAL, IoPriorityLow, MEMORY_PRIORITY_NORMAL);
 
 	_r_workqueue_initialize (&resolver_queue, 6, &environment, L"ResolverQueue");
+	_r_workqueue_initialize (&refresh_queue, 1, &environment, L"RefreshQueue");
 	_r_workqueue_initialize (&log_queue, 6, &environment, L"PacketsQueue");
 
 	_r_sys_setenvironment (&environment, THREAD_PRIORITY_HIGHEST, IoPriorityHigh, MEMORY_PRIORITY_NORMAL);
@@ -2160,6 +2163,86 @@ INT_PTR CALLBACK DlgProc (
 			return 0;
 		}
 
+		case RM_REFRESH_COMPLETE:
+		{
+			PITEM_TAB_CONTEXT tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
+			InterlockedExchange (&config.refresh_pending, 0);
+			if (tab_context)
+				_app_listview_requestredraw (hwnd, tab_context->listview_id);
+			_app_refreshstatus (hwnd);
+			return 0;
+		}
+
+		case RM_PROFILE_SAVE:
+		{
+			if (!config.save_timer_armed && InterlockedCompareExchange (&config.save_pending, 0, 0))
+			{
+				config.save_timer_armed = SetTimer (hwnd, TIMER_PROFILE_SAVE, 500, NULL) != 0;
+			}
+			return 0;
+		}
+
+		case RM_PROFILE_SAVE_ERROR:
+		{
+			_r_show_errormessage (hwnd, L"Could not save profile!", profile_info.profile_path->buffer, (NTSTATUS)wparam, ET_NATIVE);
+			return 0;
+		}
+
+		case RM_LISTVIEW_UPDATE:
+		{
+			_app_listview_updateby_id (hwnd, (INT)wparam, (ULONG)lparam);
+			return 0;
+		}
+
+		case RM_LISTVIEW_SORT:
+		{
+			PITEM_TAB_CONTEXT tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
+			if (tab_context && tab_context->listview_id == (INT)wparam)
+				_app_listview_sort (hwnd, (INT)wparam, INT_ERROR, FALSE);
+			return 0;
+		}
+
+		case RM_LISTVIEW_REDRAW:
+		{
+			SetTimer (hwnd, TIMER_REDRAW, 100, NULL);
+			return 0;
+		}
+
+		case WM_TIMER:
+		{
+			if (wparam == TIMER_PROFILE_SAVE)
+			{
+				KillTimer (hwnd, TIMER_PROFILE_SAVE);
+				config.save_timer_armed = FALSE;
+				_app_profile_save_deferred (hwnd);
+				return 0;
+			}
+			if (wparam == TIMER_SEARCH)
+			{
+				PITEM_TAB_CONTEXT tab_context;
+				KillTimer (hwnd, TIMER_SEARCH);
+				tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
+				if (tab_context)
+					_app_search_applyfilter (hwnd, tab_context->listview_id, config.search_string);
+				return 0;
+			}
+			if (wparam == TIMER_REDRAW)
+			{
+				PITEM_TAB_CONTEXT tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
+				LONG pending = InterlockedExchange (&config.redraw_pending, 0);
+				KillTimer (hwnd, TIMER_REDRAW);
+				for (INT i = IDC_APPS_PROFILE; i <= IDC_LOG; i++)
+				{
+					if (tab_context && tab_context->listview_id == i && (pending & (1L << (i - IDC_APPS_PROFILE))))
+						_r_listview_redraw (hwnd, i);
+				}
+				if (pending & 7)
+					_app_refreshstatus (hwnd);
+				return 0;
+			}
+			break;
+		}
+
 		case WM_CLOSE:
 		{
 			LPCWSTR cfg_name;
@@ -2202,6 +2285,7 @@ INT_PTR CALLBACK DlgProc (
 				_r_workqueue_destroy (&wfp_queue);
 			}
 
+			_app_profile_flushsave (hwnd);
 			_r_tray_destroy (hwnd, &GUID_TrayIcon);
 
 			_wfp_uninitialize (_wfp_getenginehandle (), FALSE);
@@ -2251,7 +2335,7 @@ INT_PTR CALLBACK DlgProc (
 
 			DragFinish (hdrop);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 
 			if (!app_hash)
 				break;
@@ -2611,7 +2695,7 @@ INT_PTR CALLBACK DlgProc (
 						{
 							_app_listview_updateby_id (hwnd, (INT)(INT_PTR)lpnmlv->hdr.idFrom, 0);
 
-							_app_profile_save (hwnd);
+							_app_profile_requestsave (hwnd);
 						}
 					}
 
@@ -2780,7 +2864,11 @@ INT_PTR CALLBACK DlgProc (
 
 				_r_obj_movereference ((PVOID_PTR)&config.search_string, string);
 
-				_app_search_applyfilter (hwnd, tab_context->listview_id, string);
+				KillTimer (hwnd, TIMER_SEARCH);
+				if (_r_obj_isstringempty (string))
+					_app_search_applyfilter (hwnd, tab_context->listview_id, string);
+				else
+					SetTimer (hwnd, TIMER_SEARCH, 180, NULL);
 
 				return 0;
 			}
@@ -2907,7 +2995,7 @@ INT_PTR CALLBACK DlgProc (
 
 								if (NT_SUCCESS (status))
 								{
-									_app_profile_save (hwnd);
+									_app_profile_requestsave (hwnd);
 
 									_app_changefilters (hwnd, TRUE, FALSE);
 								}
@@ -2947,9 +3035,11 @@ INT_PTR CALLBACK DlgProc (
 
 							if (SUCCEEDED (status))
 							{
-								_app_profile_save (hwnd); // required!
+								_app_profile_flushsave (hwnd);
+								status = _app_profile_save (hwnd);
 
-								status = _r_fs_copyfile (&profile_info.profile_path->sr, &path->sr, FALSE);
+								if (NT_SUCCESS (status))
+									status = _r_fs_copyfile (&profile_info.profile_path->sr, &path->sr, FALSE);
 
 								// display message for export profile failure (issue #707)
 								if (!NT_SUCCESS (status))
@@ -3125,8 +3215,7 @@ INT_PTR CALLBACK DlgProc (
 					if (_wfp_isfiltersapplying ())
 						break;
 
-					_app_profile_load (hwnd, NULL);
-					_app_changefilters (hwnd, TRUE, FALSE);
+					_app_command_refresh (hwnd);
 
 					break;
 				}
@@ -3213,7 +3302,7 @@ INT_PTR CALLBACK DlgProc (
 				{
 					BOOLEAN new_val = _r_config_invertboolean (L"IsLogEnabled", FALSE, NULL);
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
 
 					_app_loginit (new_val);
 
@@ -3224,7 +3313,7 @@ INT_PTR CALLBACK DlgProc (
 				{
 					BOOLEAN new_val = _r_config_invertboolean (L"IsLogUiEnabled", FALSE, NULL);
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
 
 					break;
 				}
@@ -3234,7 +3323,7 @@ INT_PTR CALLBACK DlgProc (
 					HWND hnotify;
 					BOOLEAN new_val = _r_config_invertboolean (L"IsNotificationsEnabled", TRUE, NULL);
 
-					_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
+					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
 
 					hnotify = _app_notify_getwindow (NULL);
 
@@ -3339,7 +3428,7 @@ INT_PTR CALLBACK DlgProc (
 									_app_listview_updateby_param (hwnd, ptr_app->app_hash, PR_SETITEM_UPDATE, TRUE);
 									_app_listview_showitemby_param (hwnd, ptr_app->app_hash, TRUE);
 
-									_app_profile_save (hwnd);
+									_app_profile_requestsave (hwnd);
 
 									_r_obj_dereference (ptr_app);
 								}

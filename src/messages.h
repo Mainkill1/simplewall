@@ -128,6 +128,10 @@ VOID _app_command_purgetimers (
 	_In_ HWND hwnd
 );
 
+VOID _app_command_refresh (
+	_In_ HWND hwnd
+);
+
 VOID _app_command_selectfont (
 	_In_ HWND hwnd
 );

@@ -105,9 +105,9 @@ VOID _app_message_initialize (
 		_r_menu_checkitem (hmenu, IDM_BLOCKLIST_EXTRA_DISABLE, IDM_BLOCKLIST_EXTRA_BLOCK, MF_BYCOMMAND, menu_id);
 	}
 
-	_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLENOTIFICATIONS_CHK, _r_config_getboolean (L"IsNotificationsEnabled", TRUE, NULL));
-	_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLELOG_CHK, _r_config_getboolean (L"IsLogEnabled", FALSE, NULL));
-	_r_toolbar_pressbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, _r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL));
+	_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLENOTIFICATIONS_CHK, _r_config_getboolean (L"IsNotificationsEnabled", TRUE, NULL));
+	_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLELOG_CHK, _r_config_getboolean (L"IsLogEnabled", FALSE, NULL));
+	_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, _r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL));
 }
 
 VOID _app_message_localize (
@@ -1799,7 +1799,7 @@ VOID _app_command_idtorules (
 
 	_r_obj_dereference (ptr_rule);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 }
 
 VOID _app_command_idtotimers (
@@ -1848,7 +1848,7 @@ VOID _app_command_idtotimers (
 
 	_app_listview_updateby_id (hwnd, tab_context->listview_id, PR_UPDATE_FORCE);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 }
 
 VOID _app_command_logshow (
@@ -2173,7 +2173,7 @@ VOID _app_command_checkbox (
 	{
 		_app_listview_updateby_id (hwnd, tab_context->listview_id, PR_UPDATE_FORCE);
 
-		_app_profile_save (hwnd);
+		_app_profile_requestsave (hwnd);
 	}
 
 	_r_obj_dereference (rules);
@@ -2323,6 +2323,7 @@ VOID _app_command_delete (
 
 				_r_queuedlock_acquireexclusive (&lock_rules);
 				_r_obj_setlistitem (rules_list, rule_idx, NULL);
+				_app_rulecache_invalidate ();
 				_r_queuedlock_releaseexclusive (&lock_rules);
 
 				enum_key = 0;
@@ -2372,7 +2373,7 @@ VOID _app_command_delete (
 
 	_app_listview_updateby_id (hwnd, tab_context->listview_id, 0);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 
 	if (guids)
 		_r_obj_dereference (guids);
@@ -2433,7 +2434,7 @@ VOID _app_command_disable (
 
 	_app_listview_updateby_id (hwnd, tab_context->listview_id, 0);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 }
 
 VOID _app_command_openeditor (
@@ -2470,7 +2471,10 @@ VOID _app_command_openeditor (
 				hash_code = (ULONG)_app_listview_getitemcontext (hwnd, tab_context->listview_id, item_id);
 
 				if (_app_isappfound (hash_code))
+				{
 					_r_obj_addhashtableitem (ptr_rule->apps, hash_code, NULL);
+					_app_rulecache_invalidate ();
+				}
 			}
 
 			item_id = _r_listview_getnextselected (hwnd, tab_context->listview_id, INT_ERROR);
@@ -2520,11 +2524,12 @@ VOID _app_command_openeditor (
 
 								_r_obj_dereference (ptr_app);
 
-								_app_profile_save (hwnd);
+								_app_profile_requestsave (hwnd);
 							}
 						}
 
 						_r_obj_addhashtableitem (ptr_rule->apps, ptr_network->app_hash, NULL);
+						_app_rulecache_invalidate ();
 					}
 
 					ptr_rule->protocol = ptr_network->protocol;
@@ -2569,11 +2574,12 @@ VOID _app_command_openeditor (
 
 								_r_obj_dereference (ptr_app);
 
-								_app_profile_save (hwnd);
+								_app_profile_requestsave (hwnd);
 							}
 						}
 
 						_r_obj_addhashtableitem (ptr_rule->apps, ptr_log->app_hash, NULL);
+						_app_rulecache_invalidate ();
 					}
 
 					ptr_rule->direction = ptr_log->direction;
@@ -2599,6 +2605,7 @@ VOID _app_command_openeditor (
 	{
 		_r_queuedlock_acquireexclusive (&lock_rules);
 		_r_obj_addlistitem (rules_list, _r_obj_reference (ptr_rule), &id_code);
+		_app_rulecache_invalidate ();
 		_r_queuedlock_releaseexclusive (&lock_rules);
 
 		if (id_code != SIZE_MAX)
@@ -2606,7 +2613,7 @@ VOID _app_command_openeditor (
 			_app_listview_addruleitem (hwnd, ptr_rule, id_code, TRUE);
 			_app_listview_updateby_id (hwnd, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 		}
 
 		_app_editor_deletewindow (context);
@@ -2662,7 +2669,7 @@ VOID _app_command_properties (
 
 				_app_editor_deletewindow (context);
 
-				_app_profile_save (hwnd);
+				_app_profile_requestsave (hwnd);
 			}
 
 			_r_obj_dereference (ptr_app);
@@ -2692,7 +2699,7 @@ VOID _app_command_properties (
 
 				_app_editor_deletewindow (context);
 
-				_app_profile_save (hwnd);
+				_app_profile_requestsave (hwnd);
 			}
 
 			_r_obj_dereference (ptr_rule);
@@ -2720,7 +2727,7 @@ VOID _app_command_properties (
 
 						_app_listview_updateby_param (hwnd, ptr_network->app_hash, PR_SETITEM_UPDATE, TRUE);
 
-						_app_profile_save (hwnd);
+						_app_profile_requestsave (hwnd);
 
 						_r_obj_dereference (ptr_app);
 					}
@@ -2755,7 +2762,7 @@ VOID _app_command_properties (
 
 						_app_listview_updateby_param (hwnd, ptr_log->app_hash, PR_SETITEM_UPDATE, TRUE);
 
-						_app_profile_save (hwnd);
+						_app_profile_requestsave (hwnd);
 
 						_r_obj_dereference (ptr_app);
 					}
@@ -2851,7 +2858,7 @@ VOID _app_command_purgeunused (
 
 			_app_listview_updateby_id (hwnd, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE | PR_UPDATE_FORCE);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 		}
 	}
 
@@ -2938,7 +2945,7 @@ VOID _app_command_purgetimers (
 
 			_app_listview_updateby_id (hwnd, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE | PR_UPDATE_FORCE);
 
-			_app_profile_save (hwnd);
+			_app_profile_requestsave (hwnd);
 		}
 	}
 
@@ -2975,4 +2982,14 @@ VOID _app_command_selectfont (
 	_app_listview_updateby_id (hwnd, DATA_LISTVIEW_CURRENT, PR_UPDATE_TYPE | PR_UPDATE_FORCE);
 
 	RedrawWindow (hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_NOINTERNALPAINT | RDW_ALLCHILDREN | RDW_NOFRAME);
+}
+
+VOID _app_command_refresh (
+	_In_ HWND hwnd
+)
+{
+	if (InterlockedCompareExchange (&config.refresh_pending, 1, 0) != 0)
+		return;
+
+	_r_workqueue_queueitem (&refresh_queue, &_app_queue_refresh, hwnd);
 }

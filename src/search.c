@@ -308,7 +308,7 @@ BOOLEAN _app_search_applyfiltercallback (
 	}
 
 	if (is_changed)
-		_app_listview_updateby_id (hwnd, listview_id, PR_UPDATE_NOSETVIEW | PR_UPDATE_FORCE);
+		_app_listview_updateby_id (hwnd, listview_id, PR_UPDATE_NOSETVIEW | PR_UPDATE_NOSORT | PR_UPDATE_NORESIZE | PR_UPDATE_NOSTATUS | PR_UPDATE_FORCE);
 
 	return is_changed;
 }
@@ -326,7 +326,7 @@ BOOLEAN _app_search_applyfilteritem (
 	PITEM_APP ptr_app = NULL;
 	PITEM_LOG ptr_log = NULL;
 	PR_STRING string;
-	BOOLEAN is_changed = FALSE;
+	BOOLEAN is_changed = FALSE, was_hidden = !!context->is_hidden;
 
 	// reset hidden state
 	if (context->is_hidden)
@@ -513,6 +513,9 @@ BOOLEAN _app_search_applyfilteritem (
 	}
 
 CleanupExit:
+
+	// Only the final visibility matters; intermediate field mismatches do not.
+	is_changed = (was_hidden != context->is_hidden);
 
 	if (is_changed)
 		_r_listview_setitem (hwnd, listview_id, item_id, 0, NULL, I_IMAGECALLBACK, I_GROUPIDCALLBACK, I_DEFAULT);

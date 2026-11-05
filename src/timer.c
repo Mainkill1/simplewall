@@ -168,7 +168,7 @@ VOID NTAPI _app_timer_callback (
 	if (hwnd)
 		_app_listview_updateby_id (hwnd, ptr_app->type, PR_UPDATE_TYPE | PR_UPDATE_FORCE);
 
-	_app_profile_save (hwnd);
+	_app_profile_requestsave (hwnd);
 
 	if (_r_config_getboolean (L"IsNotificationsTimer", TRUE, NULL))
 	{

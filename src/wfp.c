@@ -2049,9 +2049,9 @@ VOID NTAPI _wfp_applythread (
 	_app_restoreinterfacestate (context->hwnd, TRUE);
 	_app_setinterfacestate (context->hwnd, _r_dc_getwindowdpi (context->hwnd));
 
-	_r_freelist_deleteitem (&context_free_list, context);
+	_app_profile_requestsave (context->hwnd);
 
-	_app_profile_save (context->hwnd);
+	_r_freelist_deleteitem (&context_free_list, context);
 
 	_r_queuedlock_releaseshared (&lock_apply);
 }

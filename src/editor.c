@@ -1749,6 +1749,7 @@ INT_PTR CALLBACK EditorProc (
 						if (context->ptr_rule->type == DATA_RULE_USER)
 						{
 							_r_obj_clearhashtable (context->ptr_rule->apps);
+							_app_rulecache_invalidate ();
 
 							for (INT i = 0; i < _r_listview_getitemcount (hpage_apps, IDC_RULE_APPS_ID); i++)
 							{
@@ -1761,7 +1762,10 @@ INT_PTR CALLBACK EditorProc (
 									continue;
 
 								if (_app_isappfound (app_hash))
+								{
 									_r_obj_addhashtableitem (context->ptr_rule->apps, app_hash, NULL);
+									_app_rulecache_invalidate ();
+								}
 							}
 						}
 

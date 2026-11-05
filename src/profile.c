@@ -710,7 +710,7 @@ COLORREF _app_getappcolor (
 
 	if (ptr_app && !is_networklist)
 	{
-		if (_r_config_getboolean (L"IsHighlightInvalid", TRUE, L"colors") && !_app_isappexists (ptr_app))
+		if (_r_config_getboolean (L"IsHighlightInvalid", TRUE, L"colors") && !_app_isappexists_ui (ptr_app))
 		{
 			color_hash = config.color_invalid;
 
@@ -817,8 +817,9 @@ VOID _app_freeapplication (
 	_r_obj_removehashtableitem (apps_table, app_hash);
 }
 
-VOID _app_getcount (
-	_Out_ PITEM_STATUS status
+static VOID _app_getcount_internal (
+	_Out_ PITEM_STATUS status,
+	_In_ BOOLEAN is_ui
 )
 {
 	PITEM_APP ptr_app = NULL;
@@ -837,7 +838,7 @@ VOID _app_getcount (
 		if (_app_istimerset (ptr_app))
 			status->apps_timer_count += 1;
 
-		if (!ptr_app->is_undeletable && (!_app_isappexists (ptr_app) || !is_used) && !(ptr_app->type == DATA_APP_SERVICE || ptr_app->type == DATA_APP_UWP))
+		if (!ptr_app->is_undeletable && (!(is_ui ? _app_isappexists_ui (ptr_app) : _app_isappexists (ptr_app)) || !is_used) && !(ptr_app->type == DATA_APP_SERVICE || ptr_app->type == DATA_APP_UWP))
 			status->apps_unused_count += 1;
 
 		if (is_used)
@@ -874,6 +875,20 @@ VOID _app_getcount (
 	}
 
 	_r_queuedlock_releaseshared (&lock_rules);
+}
+
+VOID _app_getcount (
+	_Out_ PITEM_STATUS status
+)
+{
+	_app_getcount_internal (status, FALSE);
+}
+
+VOID _app_getcount_ui (
+	_Out_ PITEM_STATUS status
+)
+{
+	_app_getcount_internal (status, TRUE);
 }
 
 _Success_ (return != 0)
@@ -924,8 +939,9 @@ VOID _app_setruleiteminfo (
 	_In_ BOOLEAN include_apps
 )
 {
-	ULONG_PTR enum_key = 0;
+	PITEM_APP ptr_app;
 	ULONG hash_code;
+	INT item_count;
 
 	_r_listview_setitem (hwnd, listview_id, item_id, 0, LPSTR_TEXTCALLBACK, I_IMAGECALLBACK, I_GROUPIDCALLBACK, I_DEFAULT);
 
@@ -934,10 +950,23 @@ VOID _app_setruleiteminfo (
 	if (!include_apps)
 		return;
 
-	while (_r_obj_enumhashtable (ptr_rule->apps, NULL, &hash_code, &enum_key))
+	for (INT list_id = IDC_APPS_PROFILE; list_id <= IDC_APPS_UWP; list_id++)
 	{
-		if (hash_code != 0)
-			_app_listview_updateitemby_param (hwnd, hash_code, TRUE);
+		item_count = _r_listview_getitemcount (hwnd, list_id);
+		_app_listview_lock (hwnd, list_id);
+		for (INT i = 0; i < item_count; i++)
+		{
+			hash_code = (ULONG)_app_listview_getitemcontext (hwnd, list_id, i);
+			if (!_r_obj_findhashtable (ptr_rule->apps, hash_code))
+				continue;
+			ptr_app = _app_getappitem (hash_code);
+			if (ptr_app)
+			{
+				_app_setappiteminfo (hwnd, list_id, i, ptr_app);
+				_r_obj_dereference (ptr_app);
+			}
+		}
+		_app_listview_unlock (hwnd, list_id);
 	}
 }
 
@@ -950,6 +979,7 @@ VOID _app_ruleenable (
 	PITEM_RULE_CONFIG ptr_config;
 
 	ptr_rule->is_enabled = is_enable;
+	_app_rulecache_invalidate ();
 
 	if (!ptr_rule->is_readonly)
 		return;
@@ -984,9 +1014,12 @@ VOID _app_ruleremoveapp (
 	if (!ptr_rule->apps || !_r_obj_removehashtableitem (ptr_rule->apps, app_hash))
 		return;
 
+	_app_rulecache_invalidate ();
+
 	if (ptr_rule->is_enabled && _r_obj_isempty2 (ptr_rule->apps))
 	{
 		ptr_rule->is_enabled = FALSE;
+		_app_rulecache_invalidate ();
 		ptr_rule->is_haveerrors = FALSE;
 
 		if (hwnd && item_id != SIZE_MAX)
@@ -1019,6 +1052,7 @@ BOOLEAN _app_ruleblocklistsetchange (
 
 	ptr_rule->is_enabled_default = ptr_rule->is_enabled; // set default value for rule
 	ptr_rule->is_enabled = (new_state != 0);
+	_app_rulecache_invalidate ();
 
 	return TRUE;
 }
@@ -1100,7 +1134,7 @@ VOID _app_ruleblocklistset (
 				_wfp_createrulefilters (_wfp_getenginehandle (), rules, DBG_ARG, FALSE);
 		}
 
-		_app_profile_save (hwnd); // required!
+		_app_profile_requestsave (hwnd); // required!
 	}
 
 	_r_obj_dereference (rules);
@@ -1316,33 +1350,145 @@ BOOLEAN _app_isapphavedrive (
 	return is_havedrive;
 }
 
+VOID _app_rulecache_invalidate ()
+{
+	InterlockedIncrement (&rule_cache_generation);
+}
+
 BOOLEAN _app_isapphaverule (
 	_In_ ULONG app_hash,
 	_In_ BOOLEAN is_countdisabled
 )
 {
+	static R_QUEUED_LOCK cache_lock = PR_QUEUED_LOCK_INIT;
+	static PR_HASHTABLE membership = NULL;
+	static LONG built_generation = 0;
 	PITEM_RULE ptr_rule;
-	BOOLEAN is_haverule = FALSE;
+	ULONG_PTR enum_key;
+	ULONG hash_code;
+	ULONG flags, *entry;
+	LONG generation;
+	BOOLEAN result;
 
-	_r_queuedlock_acquireshared (&lock_rules);
+	generation = InterlockedCompareExchange (&rule_cache_generation, 0, 0);
+	_r_queuedlock_acquireshared (&cache_lock);
 
-	for (ULONG_PTR i = 0; i < _r_obj_getlistsize (rules_list); i++)
+	if (membership && built_generation == generation)
 	{
-		ptr_rule = (PITEM_RULE)_r_obj_getlistitem (rules_list, i);
-
-		if (ptr_rule && ptr_rule->type == DATA_RULE_USER && (is_countdisabled || ptr_rule->is_enabled))
-		{
-			if (_r_obj_findhashtable (ptr_rule->apps, app_hash))
-			{
-				is_haverule = TRUE;
-				break;
-			}
-		}
+		entry = (ULONG*)_r_obj_findhashtable (membership, app_hash);
+		result = entry && (*entry & (is_countdisabled ? 1 : 2));
+		_r_queuedlock_releaseshared (&cache_lock);
+		return result;
 	}
 
-	_r_queuedlock_releaseshared (&lock_rules);
+	_r_queuedlock_releaseshared (&cache_lock);
 
-	return is_haverule;
+	// Keep the existing rules -> cache lock order; invalidation never takes a lock.
+	_r_queuedlock_acquireshared (&lock_rules);
+	_r_queuedlock_acquireexclusive (&cache_lock);
+	generation = InterlockedCompareExchange (&rule_cache_generation, 0, 0);
+
+	if (!membership || built_generation != generation)
+	{
+		if (!membership)
+			membership = _r_obj_createhashtable (sizeof (ULONG), 0x100, NULL);
+		else
+			_r_obj_clearhashtable (membership);
+
+		for (ULONG_PTR i = 0; i < _r_obj_getlistsize (rules_list); i++)
+		{
+			ptr_rule = (PITEM_RULE)_r_obj_getlistitem (rules_list, i);
+			if (!ptr_rule || ptr_rule->type != DATA_RULE_USER)
+				continue;
+
+			enum_key = 0;
+			while (_r_obj_enumhashtable (ptr_rule->apps, NULL, &hash_code, &enum_key))
+			{
+				entry = (ULONG*)_r_obj_findhashtable (membership, hash_code);
+				flags = (entry ? *entry : 0) | 1 | (ptr_rule->is_enabled ? 2 : 0);
+				if (entry)
+					*entry = flags;
+				else
+					_r_obj_addhashtableitem (membership, hash_code, &flags);
+			}
+		}
+		built_generation = generation;
+	}
+
+	entry = (ULONG*)_r_obj_findhashtable (membership, app_hash);
+	result = entry && (*entry & (is_countdisabled ? 1 : 2));
+	_r_queuedlock_releaseexclusive (&cache_lock);
+	_r_queuedlock_releaseshared (&lock_rules);
+	return result;
+}
+
+static VOID NTAPI _app_queue_exists (
+	_In_ PVOID context
+)
+{
+	PITEM_APP ptr_app = (PITEM_APP)context;
+	BOOLEAN exists = _app_isappexists (ptr_app);
+	LONG previous = InterlockedExchange (&ptr_app->exists_state, exists ? 1 : 2);
+	HWND hwnd = _r_app_gethwnd ();
+
+	_InterlockedExchange64 (&ptr_app->exists_checked, (LONG64)_r_sys_gettickcount64 ());
+	InterlockedExchange (&ptr_app->exists_pending, 0);
+	if (previous != (exists ? 1 : 2) && hwnd)
+		_app_listview_requestredraw (hwnd, _app_listview_getbytype (ptr_app->type));
+	_r_obj_dereference (ptr_app);
+}
+
+BOOLEAN _app_isappexists_ui (
+	_In_ PITEM_APP ptr_app
+)
+{
+	LONG64 checked;
+
+	// Destructive operations still use _app_isappexists for a fresh result.
+	if (ptr_app->is_undeletable)
+		return TRUE;
+	if (ptr_app->is_enabled && ptr_app->is_haveerrors)
+		return FALSE;
+	if (ptr_app->type != DATA_APP_REGULAR)
+		return _app_isappexists (ptr_app);
+
+	checked = _InterlockedCompareExchange64 (&ptr_app->exists_checked, 0, 0);
+	if ((!checked || _r_sys_gettickcount64 () - checked >= 30000) &&
+		InterlockedCompareExchange (&ptr_app->exists_pending, 1, 0) == 0)
+	{
+		_r_workqueue_queueitem (&file_queue, &_app_queue_exists, _r_obj_reference (ptr_app));
+	}
+	return InterlockedCompareExchange (&ptr_app->exists_state, 0, 0) != 2;
+}
+
+VOID NTAPI _app_queue_refresh (
+	_In_ PVOID context
+)
+{
+	PR_LIST apps;
+	PITEM_APP ptr_app = NULL;
+	ULONG_PTR enum_key = 0;
+	HWND hwnd = (HWND)context;
+
+	// Hold references, not the apps lock, while checking paths on disk.
+	apps = _r_obj_createlist (0x100, &_r_obj_dereference);
+	_r_queuedlock_acquireshared (&lock_apps);
+	while (_r_obj_enumhashtablepointer (apps_table, (PVOID_PTR)&ptr_app, NULL, &enum_key))
+		_r_obj_addlistitem (apps, _r_obj_reference (ptr_app), NULL);
+	_r_queuedlock_releaseshared (&lock_apps);
+
+	for (ULONG_PTR i = 0; i < _r_obj_getlistsize (apps); i++)
+	{
+		ptr_app = (PITEM_APP)_r_obj_getlistitem (apps, i);
+		if (InterlockedCompareExchange (&ptr_app->exists_pending, 1, 0) == 0)
+			_app_queue_exists (_r_obj_reference (ptr_app));
+
+		// Existing metadata jobs deduplicate requests and retry failed loads.
+		_app_getfileinformation (ptr_app->real_path, ptr_app->app_hash, ptr_app->type, _app_listview_getbytype (ptr_app->type));
+	}
+	_r_obj_dereference (apps);
+
+	PostMessageW (hwnd, RM_REFRESH_COMPLETE, 0, 0);
 }
 
 BOOLEAN _app_isappexists (
@@ -1598,6 +1744,7 @@ static VOID _app_profile_refresh (
 	// clear rules
 	_r_queuedlock_acquireexclusive (&lock_rules);
 	_r_obj_clearlist (rules_list);
+	_app_rulecache_invalidate ();
 	_r_queuedlock_releaseexclusive (&lock_rules);
 
 	// clear rules config
@@ -1624,6 +1771,9 @@ NTSTATUS _app_profile_load (
 	DB_INFORMATION db_info;
 	BOOLEAN is_update;
 	NTSTATUS status;
+
+	if (hwnd)
+		_app_profile_flushsave (hwnd);
 
 	status = _app_db_initialize (&db_info, TRUE);
 
@@ -1705,6 +1855,138 @@ CleanupExit:
 	return status;
 }
 
+static VOID _app_profile_waitwrites ()
+{
+	// The public SDK waits for dequeue, rather than callback completion.
+	while (InterlockedCompareExchange (&profile_writes_pending, 0, 0))
+	{
+		if (WaitForSingleObject (profile_write_event, INFINITE) == WAIT_FAILED)
+			Sleep (10);
+	}
+}
+
+typedef struct _APP_PROFILE_SNAPSHOT
+{
+	PR_BYTE bytes;
+	PR_STRING path;
+	HWND hwnd;
+	LONG64 timestamp;
+} APP_PROFILE_SNAPSHOT, *PAPP_PROFILE_SNAPSHOT;
+
+static VOID NTAPI _app_profile_write_snapshot (
+	_In_ PVOID context
+)
+{
+	PAPP_PROFILE_SNAPSHOT snapshot = (PAPP_PROFILE_SNAPSHOT)context;
+	PR_STRING temporary = _r_obj_concatstrings (2, snapshot->path->buffer, L".pending");
+	HANDLE hfile;
+	NTSTATUS status;
+	ULONG attributes;
+
+	_r_queuedlock_acquireexclusive (&lock_profile);
+	status = _r_fs_createfile (&hfile, &temporary->sr, FILE_OVERWRITE_IF, GENERIC_WRITE, FILE_SHARE_READ, FILE_ATTRIBUTE_NORMAL, 0, FALSE, NULL);
+	if (NT_SUCCESS (status))
+	{
+		status = _r_fs_writefile (hfile, snapshot->bytes->buffer, (ULONG)snapshot->bytes->length);
+		NtClose (hfile);
+		if (NT_SUCCESS (status))
+		{
+			if (NT_SUCCESS (_r_fs_getattributes (&snapshot->path->sr, &attributes)) && (attributes & FILE_ATTRIBUTE_READONLY))
+				_r_fs_setattributes (&snapshot->path->sr, NULL, attributes & ~FILE_ATTRIBUTE_READONLY);
+			status = _r_fs_movefile (&temporary->sr, &snapshot->path->sr, FALSE);
+		}
+	}
+
+	if (NT_SUCCESS (status) && _r_config_getboolean (L"IsBackupProfile", TRUE, NULL) &&
+		(!_r_fs_isexists (&profile_info.profile_path_backup->sr) ||
+		snapshot->timestamp - _r_config_getlong64 (L"BackupTimestamp", 0, NULL) >= _r_config_getlong64 (L"BackupPeriod", BACKUP_HOURS_PERIOD, NULL)))
+	{
+		if (NT_SUCCESS (_r_fs_copyfile (&snapshot->path->sr, &profile_info.profile_path_backup->sr, FALSE)))
+			_r_config_setlong64 (L"BackupTimestamp", snapshot->timestamp, NULL);
+	}
+	_r_queuedlock_releaseexclusive (&lock_profile);
+
+	if (!NT_SUCCESS (status))
+	{
+		_r_log (LOG_LEVEL_ERROR, NULL, L"Save profile", snapshot->path->buffer, status);
+		PostMessageW (snapshot->hwnd, RM_PROFILE_SAVE_ERROR, (WPARAM)status, 0);
+	}
+	_r_obj_dereference (temporary);
+	_r_obj_dereference (snapshot->bytes);
+	_r_obj_dereference (snapshot->path);
+	_r_mem_free (snapshot);
+	InterlockedDecrement (&profile_writes_pending);
+	SetEvent (profile_write_event);
+}
+
+VOID _app_profile_requestsave (
+	_In_opt_ HWND hwnd
+)
+{
+	if (!hwnd)
+	{
+		_app_profile_save (NULL);
+		return;
+	}
+	hwnd = _r_app_gethwnd ();
+	if (hwnd)
+	{
+		InterlockedExchange (&config.save_pending, 1);
+		PostMessageW (hwnd, RM_PROFILE_SAVE, 0, 0);
+	}
+}
+
+VOID _app_profile_save_deferred (
+	_In_ HWND hwnd
+)
+{
+	DB_INFORMATION db_info;
+	PAPP_PROFILE_SNAPSHOT snapshot;
+	NTSTATUS status;
+
+	if (!InterlockedExchange (&config.save_pending, 0))
+		return;
+
+	status = _app_db_initialize (&db_info, FALSE);
+	if (FAILED (status))
+	{
+		PostMessageW (hwnd, RM_PROFILE_SAVE_ERROR, (WPARAM)status, 0);
+		return;
+	}
+
+	// Capture on the UI thread; the disk worker never reads mutable app/rule data.
+	snapshot = (PAPP_PROFILE_SNAPSHOT)_r_mem_allocate (sizeof (APP_PROFILE_SNAPSHOT));
+	snapshot->hwnd = hwnd;
+	snapshot->path = _r_obj_reference (profile_info.profile_path);
+	snapshot->timestamp = _r_unixtime_now ();
+	status = _app_db_savetostream (&db_info, XML_VERSION_MAXIMUM, XML_TYPE_PROFILE, snapshot->timestamp);
+	if (NT_SUCCESS (status))
+		status = _app_db_encodebody (&db_info, _app_getprofiletype (), &snapshot->bytes);
+	_app_db_destroy (&db_info);
+
+	if (NT_SUCCESS (status))
+	{
+		InterlockedIncrement (&profile_writes_pending);
+		_r_workqueue_queueitem (&profile_queue, &_app_profile_write_snapshot, snapshot);
+	}
+	else
+	{
+		_r_obj_dereference (snapshot->path);
+		_r_mem_free (snapshot);
+		PostMessageW (hwnd, RM_PROFILE_SAVE_ERROR, (WPARAM)status, 0);
+	}
+}
+
+VOID _app_profile_flushsave (
+	_In_ HWND hwnd
+)
+{
+	KillTimer (hwnd, TIMER_PROFILE_SAVE);
+	config.save_timer_armed = FALSE;
+	_app_profile_save_deferred (hwnd);
+	_app_profile_waitwrites ();
+}
+
 NTSTATUS _app_profile_save (
 	_In_opt_ HWND hwnd
 )
@@ -1714,6 +1996,7 @@ NTSTATUS _app_profile_save (
 	BOOLEAN is_backuprequired = FALSE;
 	NTSTATUS status;
 
+	_app_profile_waitwrites ();
 	status = _app_db_initialize (&db_info, FALSE);
 
 	if (FAILED (status))

@@ -302,6 +302,17 @@ VOID _app_getapptooltipstring (
 	}
 }
 
+VOID _app_toolbar_setchecked (
+	_In_ HWND hwnd,
+	_In_ INT ctrl_id,
+	_In_ UINT command_id,
+	_In_ BOOLEAN is_checked
+)
+{
+	_r_wnd_sendmessage (hwnd, ctrl_id, TB_PRESSBUTTON, command_id, FALSE);
+	_r_wnd_sendmessage (hwnd, ctrl_id, TB_CHECKBUTTON, command_id, MAKELPARAM (is_checked, 0));
+}
+
 _Ret_maybenull_
 PR_STRING _app_gettooltipbylparam (
 	_In_ HWND hwnd,
@@ -1057,7 +1068,7 @@ VOID _app_refreshstatus (
 
 	_r_dc_fixfont (hdc, hwnd, IDC_STATUSBAR); // fix font
 
-	_app_getcount (&status);
+	_app_getcount_ui (&status);
 
 	dpi_value = _r_dc_getwindowdpi (hwnd);
 
