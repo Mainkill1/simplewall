@@ -1,0 +1,32 @@
+name: Publish host-verified packet history binary
+on:
+  push:
+    branches: [release/host-verified-3.9.2-fork.2]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Fetch the release payload
+        run: |
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --depth=1 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+      - name: Verify the host-tested binary and publish
+        run: |
+          cp .release/simplewall-3.9.2-fork.2-win64.zip .
+          unzip -q simplewall-3.9.2-fork.2-win64.zip -d payload
+          cp payload/simplewall.exe .
+          cp .release/SHA256SUMS.txt .
+          sha256sum -c SHA256SUMS.txt
+          gh release create v3.9.2-fork.2 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target 4bf72620133eac9698c785f141c1f225be3de5ac \
+            --title "simplewall 3.9.2-fork.2 (Persistent packet history)" \
+            --notes-file .release/notes.md \
+            simplewall.exe simplewall-3.9.2-fork.2-win64.zip SHA256SUMS.txt
