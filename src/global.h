@@ -124,3 +124,5 @@ DECLSPEC_SELECTANY const LONG64 timer_array[] =
 #include "udpstats.h"
 #include "uwp.h"
 #include "wfp.h"
+
+#include "packet_history.h"

@@ -452,6 +452,8 @@ VOID _app_listview_updateby_id (
 		listview_id = lparam;
 	}
 
+	if(listview_id==IDC_LOG){_app_packet_view_refresh();return;}
+
 	if ((flags & PR_UPDATE_FORCE) || (listview_id == tab_context->listview_id))
 	{
 		if (!(flags & PR_UPDATE_NOREDRAW))
@@ -723,6 +725,7 @@ VOID _app_listview_resize (
 	_In_ BOOLEAN is_forced
 )
 {
+	if(listview_id==IDC_LOG)return;
 	HDC hdc_listview = NULL, hdc_header = NULL;
 	HWND header = NULL, hlistview;
 	PR_STRING string;

@@ -40,3 +40,45 @@ CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' python3 tests/test
 `smoke-optimized` directories with 10,000 apps and 1,000 rules. It requires an
 elevated PowerShell session and refuses synthetic-profile testing if a simplewall
 WFP provider already exists. It does not enable filters.
+
+## Persistent packet history
+
+The packet tab now uses a native app split view and the bundled, unmodified
+SQLite 3.54.1 amalgamation in `vendor/sqlite`. No SQLite DLL installation is
+required. Source provenance and archive checksum are recorded there.
+
+Packet capture retains original events in `packet-history.db` in the existing
+per-user profile directory. Blocked/Allowed views sort apps by latest matching
+activity, with stable selection. Group repeats changes only the view. Raw and
+grouped details are paged at 500 rows; history is never expanded into one list
+item per stored event. Reverse DNS is cached background enrichment, not a
+historically captured hostname.
+
+Retention defaults: 200,000 events per app, 7 days and a 1 GiB total budget.
+The Retention button changes defaults or the selected app's event limit. A noisy
+app reaches its own limit first; global storage pressure can evict the oldest
+records across apps. The UI reports retained ranges, eviction counts and lost
+events. Disk/journal pressure rejects new captures explicitly until storage can
+recover, rather than allowing unbounded queues. The byte budget reserves
+headroom and monitors database/WAL/SHM; temporary SQLite work can grow
+transiently. Capture is controlled by the existing packet-log toggle. Allowed
+events still follow the existing exclusion settings.
+
+Run production storage, paging, overload, churn, journal pressure, rollback and
+restart regressions on Linux:
+
+```sh
+python3 tests/test_packet_history.py
+CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' python3 tests/test_packet_history.py
+cc -Isrc tests/packet-queue-test.c -o /tmp/packet-queue-test
+/tmp/packet-queue-test
+```
+
+On Windows run `tools/test-packet-history.ps1`. Native live UI checks are in
+`tests/windows-packet-history.ps1 -RequireHistory`, run elevated while the app
+has retained events. They inspect real controls and generate one short blocked
+curl connection, preserving firewall settings. Before backing up/restoring the
+history database, close simplewall gracefully so its writer drains and SQLite
+checkpoints its journal. Do not copy only the main database from a running
+process. The original session-only packet cache and discarded events cannot
+be recovered retroactively.

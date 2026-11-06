@@ -249,6 +249,7 @@ typedef struct _PROFILE_DATA
 
 typedef struct _ITEM_LOG
 {
+	SIZE_T capture_bytes;
 	union
 	{
 		IN6_ADDR remote_addr6;

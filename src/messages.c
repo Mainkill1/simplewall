@@ -254,7 +254,7 @@ VOID _app_message_localize (
 	_r_toolbar_setbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLENOTIFICATIONS_CHK, _r_locale_getstring (IDS_ENABLENOTIFICATIONS_CHK), BTNS_CHECK | BTNS_AUTOSIZE, 0, I_DEFAULT);
 	_r_toolbar_setbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLELOG_CHK, _r_locale_getstring (IDS_ENABLELOG_CHK), BTNS_CHECK | BTNS_AUTOSIZE, 0, I_DEFAULT);
 
-	_r_obj_movereference ((PVOID_PTR)&localized_string, _r_format_string (L"%s (%s)", _r_locale_getstring (IDS_ENABLEUILOG_CHK), _r_locale_getstring (IDS_SESSION_ONLY)));
+	_r_obj_movereference ((PVOID_PTR)&localized_string, _r_obj_createstring (L"Enable persistent packet history"));
 	_r_toolbar_setbutton (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, localized_string->buffer, BTNS_CHECK | BTNS_AUTOSIZE, 0, I_DEFAULT);
 
 	_r_obj_movereference ((PVOID_PTR)&localized_string, _r_format_string (L"%s (Ctrl+I)", _r_locale_getstring (IDS_LOGSHOW)));
@@ -882,7 +882,7 @@ VOID _app_message_traycontextmenu (
 	_r_menu_setitemtext (hsubmenu, IDM_TRAY_NOTIFICATIONFULLSCREENSILENTMODE_CHK, FALSE, _r_locale_getstring (IDS_NOTIFICATIONFULLSCREENSILENTMODE_CHK));
 	_r_menu_setitemtext (hsubmenu, IDM_TRAY_NOTIFICATIONONTRAY_CHK, FALSE, _r_locale_getstring (IDS_NOTIFICATIONONTRAY_CHK));
 	_r_menu_setitemtext (hsubmenu, IDM_TRAY_ENABLELOG_CHK, FALSE, _r_locale_getstring (IDS_ENABLELOG_CHK));
-	_r_menu_setitemtextformat (hsubmenu, IDM_TRAY_ENABLEUILOG_CHK, FALSE, L"%s (%s)", _r_locale_getstring (IDS_ENABLEUILOG_CHK), _r_locale_getstring (IDS_SESSION_ONLY));
+	_r_menu_setitemtext (hsubmenu, IDM_TRAY_ENABLEUILOG_CHK, FALSE, L"Enable persistent packet history");
 	_r_menu_setitemtext (hsubmenu, IDM_TRAY_LOGSHOW, FALSE, _r_locale_getstring (IDS_LOGSHOW));
 	_r_menu_setitemtext (hsubmenu, IDM_TRAY_LOGCLEAR, FALSE, _r_locale_getstring (IDS_LOGCLEAR));
 	_r_menu_setitemtext (hsubmenu, ERRLOG_ID, TRUE, _r_locale_getstring (IDS_TRAY_LOGERR));
@@ -1930,7 +1930,8 @@ VOID _app_command_logclear (
 	if (current_handle)
 		_r_fs_getsize (NULL, current_handle, &file_size);
 
-	is_valid = (current_handle && file_size > 2) || (log_path && _r_fs_isexists (&log_path->sr));
+	PITEM_TAB_CONTEXT packet_tab=_app_listview_getcontext(hwnd,INT_ERROR);
+	is_valid = (packet_tab&&packet_tab->listview_id==IDC_LOG) || _r_config_getboolean(L"IsLogUiEnabled",FALSE,NULL) || (current_handle && file_size > 2) || (log_path && _r_fs_isexists (&log_path->sr));
 
 	if (!is_valid)
 	{

@@ -965,7 +965,7 @@ INT_PTR CALLBACK SettingsProc (
 				{
 					_r_ctrl_setstring (hwnd, IDC_ENABLELOG_CHK, _r_locale_getstring (IDS_ENABLELOG_CHK));
 					_r_ctrl_setstring (hwnd, IDC_LOGSIZELIMIT_HINT, _r_locale_getstring (IDS_LOGSIZELIMIT_HINT));
-					_r_ctrl_setstringformat (hwnd, IDC_ENABLEUILOG_CHK, L"%s (%s)", _r_locale_getstring (IDS_ENABLEUILOG_CHK), _r_locale_getstring (IDS_SESSION_ONLY));
+					_r_ctrl_setstring (hwnd, IDC_ENABLEUILOG_CHK, L"Enable persistent packet history");
 
 					break;
 				}
@@ -1991,6 +1991,7 @@ INT_PTR CALLBACK DlgProc (
 
 			// initialize tabs
 			_app_tabs_init (hwnd, dpi_value);
+			_app_packet_init(hwnd);
 
 			// load profile
 			_app_profile_load (hwnd, NULL);
@@ -2276,6 +2277,8 @@ INT_PTR CALLBACK DlgProc (
 
 		case WM_DESTROY:
 		{
+			_wfp_logunsubscribe(_wfp_getenginehandle());
+			_app_packet_shutdown();
 			_app_network_stop ();
 			_app_loginit (FALSE);
 
@@ -2357,6 +2360,7 @@ INT_PTR CALLBACK DlgProc (
 
 		case WM_THEMECHANGED:
 		{
+            SendDlgItemMessageW(hwnd,IDC_LOG,WM_THEMECHANGED,0,0);
 			LONG dpi_value;
 
 			dpi_value = _r_dc_getwindowdpi (hwnd);
@@ -2788,7 +2792,7 @@ INT_PTR CALLBACK DlgProc (
 			{
 				case PBT_APMSUSPEND:
 				{
-					_app_logclear_ui (hwnd);
+					_app_packet_view_refresh();
 
 					if (config.is_neteventset)
 						_wfp_logunsubscribe (_wfp_getenginehandle ());
@@ -2846,6 +2850,9 @@ INT_PTR CALLBACK DlgProc (
 		{
 			INT ctrl_id = LOWORD (wparam);
 			INT notify_code = HIWORD (wparam);
+			PITEM_TAB_CONTEXT packet_tab=_app_listview_getcontext(hwnd,INT_ERROR);
+            if(packet_tab&&packet_tab->listview_id==IDC_LOG&&_app_packet_view_command(ctrl_id))return 0;
+
 
 			if (notify_code == EN_CHANGE)
 			{

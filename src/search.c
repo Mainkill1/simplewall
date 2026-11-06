@@ -541,6 +541,8 @@ VOID _app_search_applyfilter (
 	_In_opt_ PR_STRING search_string
 )
 {
+	if(listview_id==IDC_LOG)return;
+
 	if (!((listview_id >= IDC_APPS_PROFILE && listview_id <= IDC_LOG) || listview_id == IDC_RULE_APPS_ID || listview_id == IDC_APP_RULES_ID))
 		return;
 

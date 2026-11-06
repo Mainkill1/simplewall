@@ -1,0 +1,4 @@
+This distribution includes SQLite 3.54.1, which is in the public domain.
+SQLite authors disclaim copyright on their contributions.
+Official copyright statement: https://www.sqlite.org/copyright.html
+Source archive provenance and checksum: vendor/sqlite/README.md.

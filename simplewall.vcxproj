@@ -385,6 +385,10 @@
     <ClCompile Include="src\icons.c" />
     <ClCompile Include="src\listview.c" />
     <ClCompile Include="src\log.c" />
+    <ClCompile Include="src\packet_history.c" />
+    <ClCompile Include="src\packet_view.c"><AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions></ClCompile>
+    <ClCompile Include="src\packet_store.c"><CallingConvention>Cdecl</CallingConvention></ClCompile>
+    <ClCompile Include="vendor\sqlite\sqlite3.c"><CallingConvention>Cdecl</CallingConvention><PreprocessorDefinitions>SQLITE_OMIT_LOAD_EXTENSION;%(PreprocessorDefinitions)</PreprocessorDefinitions><WarningLevel>TurnOffAllWarnings</WarningLevel></ClCompile>
     <ClCompile Include="src\main.c" />
     <ClCompile Include="src\network.c" />
     <ClCompile Include="src\notifications.c" />

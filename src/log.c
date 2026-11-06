@@ -162,19 +162,11 @@ VOID _app_logclear (
 	_r_obj_dereference (log_path);
 }
 
-VOID _app_logclear_ui (
-	_In_ HWND hwnd
-)
+VOID _app_logclear_ui (HWND hwnd)
 {
-	_InterlockedExchange (&config.log_id, 0);
-
-	_r_listview_deleteallitems (hwnd, IDC_LOG);
-
-	_app_listview_resize (hwnd, IDC_LOG, FALSE);
-
-	_r_queuedlock_acquireexclusive (&lock_loglist);
-	_r_obj_clearhashtable (log_table);
-	_r_queuedlock_releaseexclusive (&lock_loglist);
+ (void)hwnd;
+ _app_packet_command(1,0,0,0,0);
+ _app_packet_view_refresh();
 }
 
 VOID _app_logwrite (
@@ -243,53 +235,10 @@ VOID _app_logwrite (
 	_r_obj_dereference (buffer);
 }
 
-VOID _app_logwrite_ui (
-	_In_ HWND hwnd,
-	_In_ PITEM_LOG ptr_log
-)
+VOID _app_logwrite_ui (HWND hwnd, PITEM_LOG ptr_log)
 {
-	ULONG_PTR table_size;
-	ULONG hash_code, log_hash;
-	INT item_id;
-
-	log_hash = _app_getloghash (ptr_log);
-
-	if (!log_hash)
-		return;
-
-	// log was already in list, so skip it...
-	if (_app_islogfound (log_hash))
-		return;
-
-	_r_queuedlock_acquireshared (&lock_loglist);
-	table_size = _r_obj_gethashtablesize (log_table);
-	_r_queuedlock_releaseshared (&lock_loglist);
-
-	if (table_size >= MAP_CACHE_MAX)
-	{
-		item_id = _r_listview_getitemcount (hwnd, IDC_LOG) - 1;
-
-		hash_code = (ULONG)_app_listview_getitemcontext (hwnd, IDC_LOG, item_id);
-
-		_r_listview_deleteitem (hwnd, IDC_LOG, item_id);
-
-		if (hash_code)
-		{
-			_r_queuedlock_acquireexclusive (&lock_loglist);
-			_r_obj_removehashtableitem (log_table, hash_code);
-			_r_queuedlock_releaseexclusive (&lock_loglist);
-		}
-	}
-
-	_r_queuedlock_acquireexclusive (&lock_loglist);
-	_r_obj_addhashtablepointer (log_table, log_hash, _r_obj_reference (ptr_log));
-	_r_queuedlock_releaseexclusive (&lock_loglist);
-
-	_app_listview_addlogitem (hwnd, ptr_log, log_hash);
-
-	_app_queue_resolver (hwnd, IDC_LOG, log_hash, ptr_log);
-
-	_app_listview_updateby_id (hwnd, IDC_LOG, 0);
+ (void)hwnd;
+ _app_packet_submit(ptr_log);
 }
 
 VOID _wfp_logsubscribe (
@@ -554,8 +503,20 @@ VOID CALLBACK _wfp_logcallback (
 
 	FwpmFreeMemory0 ((PVOID_PTR)&filter_ptr);
 
+	// Bound queued and in-flight capture objects independently of the UI.
+ SIZE_T capture_bytes=sizeof(ITEM_LOG)+4096;
+ if(log->app_id)capture_bytes+=wcslen((LPCWSTR)log->app_id)*sizeof(WCHAR)*2;
+ if(filter_name)capture_bytes+=filter_name->length;
+ if(layer_name)capture_bytes+=layer_name->length;
+ if(!_app_packet_capture_reserve(capture_bytes)){
+  if(filter_name)_r_obj_dereference(filter_name);
+  if(layer_name)_r_obj_dereference(layer_name);
+  return;
+ }
 	// allocate log object
 	ptr_log = (PITEM_LOG)_r_obj_allocate (sizeof (ITEM_LOG), &_app_dereferencelog);
+
+	ptr_log->capture_bytes=capture_bytes;
 
 	// copy date and time
 	ptr_log->timestamp = _r_unixtime_from_filetime (&log->timestamp);
@@ -675,6 +636,7 @@ VOID CALLBACK _wfp_logcallback (
 	ptr_log->filter_name = filter_name;
 	ptr_log->layer_name = layer_name;
 
+	_app_packet_submit(ptr_log);
 	_r_workqueue_queueitem (&log_queue, &_app_logthread, ptr_log);
 
 	if (sid_string)
@@ -1379,13 +1341,12 @@ VOID NTAPI _app_logthread (
 		if (is_logenabled)
 			_app_logwrite (ptr_log);
 
-		// only for my own provider write log to a ui
-		if (ptr_log->is_myprovider && is_loguienabled)
-			_app_logwrite_ui (hwnd, ptr_log);
+		// Persistent history is handed off before this notification/CSV worker.
 	}
 
 	if (ptr_app)
 		_r_obj_dereference (ptr_app);
 
+	_app_packet_capture_release(ptr_log->capture_bytes);
 	_r_obj_dereference (ptr_log);
 }
