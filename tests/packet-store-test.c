@@ -5,6 +5,162 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+static void sort_host(void *ctx, const char *address, int family, char *out, int size)
+{
+	(void)ctx;
+	(void)family;
+	if (strcmp(address, "10.0.0.2") == 0)
+		snprintf(out, size, "zeta.example");
+	else if (strcmp(address, "10.0.0.10") == 0)
+		snprintf(out, size, "alpha.example");
+}
+
+static void test_ordering(const char *path)
+{
+	PH_STORE *store = NULL;
+	PH_STORE *reader = NULL;
+	PH_PAGE *page = calloc(1, sizeof(*page));
+	PH_APPS *apps = calloc(1, sizeof(*apps));
+	PH_SORT_KEYS keys = {0};
+	keys.hostname = sort_host;
+	assert(page && apps);
+	char sort_path[4096];
+	snprintf(sort_path, sizeof(sort_path), "%s-sort", path);
+	remove(sort_path);
+	assert(!ph_open(&store, sort_path, 0));
+
+	PH_EVENT event = {.rule = "allow", .direction = 0, .protocol = 6};
+	char app_path[48], address[24];
+	assert(!ph_begin(store));
+	for (int i = 0; i < 510; i++)
+	{
+		snprintf(app_path, sizeof(app_path), "C:\\%04d\\app-%04d.exe", 509 - i, i);
+		snprintf(address, sizeof(address), "10.0.%d.%d", i / 256, i % 256);
+		event.identity = event.path = app_path;
+		event.remote = address;
+		event.remote_port = 510 - i;
+		event.timestamp = 1800000000 + i;
+		assert(!ph_append(store, &event));
+	}
+	/* Only this app has two grouped events; latest recency still belongs to another app. */
+	event.identity = event.path = "C:\\0509\\app-0000.exe";
+	event.remote = "10.0.0.0";
+	event.remote_port = 510;
+	event.timestamp = 1800000000;
+	assert(!ph_append(store, &event));
+	assert(!ph_commit(store));
+	assert(!ph_open(&reader, sort_path, 1));
+	ph_set_sort_keys(reader, &keys);
+
+	assert(!ph_apps(store, 0, "", 0, (PH_ORDER){PH_SORT_APP, 1}, apps));
+	assert(apps->count == 500 && apps->more && strstr(apps->items[0].path, "app-0000.exe"));
+	assert(!ph_apps(store, 0, "", 500, (PH_ORDER){PH_SORT_APP, 1}, apps));
+	assert(apps->count == 10 && !apps->more && strstr(apps->items[0].path, "app-0500.exe"));
+	assert(!ph_apps(store, 0, "", 0, (PH_ORDER){PH_SORT_COUNT, 0}, apps));
+	assert(apps->items[0].count == 2 && strstr(apps->items[0].path, "app-0000.exe"));
+
+	PH_QUERY query = {.direction = -1, .grouped = 1, .order = {PH_SORT_PORT, 1}};
+	assert(!ph_query(reader, &query, page));
+	assert(page->count == 500 && page->more && page->rows[0].remote_port == 1);
+	query.offset = 500;
+	assert(!ph_query(reader, &query, page));
+	assert(page->count == 10 && page->rows[0].remote_port == 501);
+	query.offset = 0;
+	query.order.ascending = 0;
+	assert(!ph_query(reader, &query, page));
+	assert(page->rows[0].remote_port == 510 && page->rows[0].count == 2);
+	query.order = (PH_ORDER){PH_SORT_REMOTE, 1};
+	assert(!ph_query(reader, &query, page));
+	assert(!strcmp(page->rows[2].remote, "10.0.0.2"));
+	query.order = (PH_ORDER){PH_SORT_HOST, 1};
+	assert(!ph_query(reader, &query, page));
+	assert(!strcmp(page->rows[0].remote, "10.0.0.10"));
+	assert(!strcmp(page->rows[1].remote, "10.0.0.2"));
+	query.order.ascending = 0;
+	assert(!ph_query(reader, &query, page));
+	assert(!strcmp(page->rows[0].remote, "10.0.0.2"));
+	query.grouped = 0;
+	query.order = (PH_ORDER){PH_SORT_COUNT, 1};
+	assert(!ph_query(reader, &query, page));
+	assert(page->rows[0].id == 1 && page->rows[1].id == 2);
+	query.order.ascending = 0;
+	assert(!ph_query(reader, &query, page));
+	assert(page->rows[0].id == 511 && page->rows[1].id == 510);
+	assert(page->total == 511 && page->inbound == 511 && page->outbound == 0);
+
+	/* A change committed by the writer must invalidate the reader's cached totals. */
+	event.direction = 1;
+	event.remote = "192.0.2.1";
+	event.timestamp++;
+	assert(!ph_begin(store));
+	assert(!ph_append(store, &event));
+	assert(!ph_commit(store));
+	assert(!ph_query(reader, &query, page));
+	assert(page->rows[0].id == 512 && page->total == 512 && page->outbound == 1);
+	assert(page->destinations == 511);
+	query.direction = 1;
+	assert(!ph_query(reader, &query, page));
+	assert(page->count == 1 && page->total == 1 && page->inbound == 0 && page->outbound == 1);
+
+	ph_close(reader);
+	ph_close(store);
+	remove(sort_path);
+	free(page);
+	free(apps);
+}
+
+static void test_services(const char *path)
+{
+	PH_STORE *store = NULL;
+	PH_PAGE *page = calloc(1, sizeof(*page));
+	char service_path[4096];
+	snprintf(service_path, sizeof(service_path), "%s-service", path);
+	remove(service_path);
+	assert(page && !ph_open(&store, service_path, 0));
+	PH_EVENT event = {
+		.identity = "svchost", .path = "C:\\Windows\\System32\\svchost.exe",
+		.remote = "1.1.1.1", .remote_port = 443, .protocol = 6, .timestamp = 1800000000
+	};
+	assert(!ph_append(store, &event));
+	ph_close(store);
+
+	/* Simulate a saved v2 log, then reopen it through the normal upgrade path. */
+	sqlite3 *db = NULL;
+	assert(sqlite3_open(service_path, &db) == SQLITE_OK);
+	assert(sqlite3_exec(db, "ALTER TABLE events DROP COLUMN service; ALTER TABLE events DROP COLUMN pid;"
+		"ALTER TABLE events DROP COLUMN process_started; PRAGMA user_version=2;",
+		NULL, NULL, NULL) == SQLITE_OK);
+	sqlite3_close(db);
+	assert(!ph_open(&store, service_path, 0));
+	event.service = "BITS";
+	assert(!ph_append(store, &event));
+	assert(!ph_append(store, &event));
+	event.service = "wuauserv";
+	assert(!ph_append(store, &event));
+	assert(!ph_set_packet_process(store, ph_inserted_id(store), 1234, event.timestamp - 5, "BITS"));
+	assert(!ph_set_packet_process(store, 1, 4321, event.timestamp - 9, NULL));
+	ph_close(store);
+
+	assert(!ph_open(&store, service_path, 1));
+	PH_QUERY query = {.direction = -1, .grouped = 1, .order = {PH_SORT_SERVICE, 1}};
+	assert(!ph_query(store, &query, page));
+	assert(page->count == 3 && page->total == 4);
+	assert(!strcmp(page->rows[0].service, "BITS") && page->rows[0].count == 2);
+	assert(!strcmp(page->rows[1].service, "wuauserv") && page->rows[1].count == 1);
+	assert(!page->rows[2].service[0] && page->rows[2].id == 1);
+	query.grouped = 0;
+	query.order.ascending = 0;
+	assert(!ph_query(store, &query, page));
+	assert(page->count == 4 && !strcmp(page->rows[0].service, "wuauserv"));
+	assert(!strcmp(page->rows[1].service, "BITS") && !page->rows[3].service[0]);
+	assert(page->rows[0].pid == 1234 && page->rows[0].process_started == event.timestamp - 5);
+	assert(page->rows[3].pid == 4321 && page->rows[3].id == 1);
+	ph_close(store);
+	remove(service_path);
+	free(page);
+}
+
 int main(int argc, char **argv)
 {
 	PH_STORE *s = NULL;
@@ -15,6 +171,8 @@ int main(int argc, char **argv)
 	int i;
 	int64_t now = 1800000000;
 	assert(argc == 2);
+	test_services(argv[1]);
+	test_ordering(argv[1]);
 	remove(argv[1]);
 	assert(ph_open(&s, argv[1], 0) == 0);
 	e.identity = "c:\\one\\same.exe";
@@ -42,7 +200,7 @@ int main(int argc, char **argv)
 	e.timestamp = now - 10;
 	assert(!ph_append(s, &e));
 	assert(!ph_commit(s));
-	assert(!ph_apps(s, 0, "", 0, a));
+	assert(!ph_apps(s, 0, "", 0, (PH_ORDER){0}, a));
 	assert(a->count == 2);
 	assert(a->items[0].count == 2);
 	assert(a->items[0].last == now + 20);
@@ -71,7 +229,7 @@ int main(int argc, char **argv)
 	}
 	assert(!ph_query(s, &q, p));
 	assert(p->total == 3);
-	assert(!ph_apps(s, 0, "two", 0, a));
+	assert(!ph_apps(s, 0, "two", 0, (PH_ORDER){0}, a));
 	assert(a->count == 1 && a->items[0].count == 2);
 	assert(!ph_clear(s, q.app));
 	assert(!ph_query(s, &q, p));
@@ -87,7 +245,7 @@ int main(int argc, char **argv)
 	e.timestamp = now + 150;
 	assert(!ph_append(s, &e));
 	assert(!ph_commit(s));
-	assert(!ph_apps(s, 0, "cleared", 0, a));
+	assert(!ph_apps(s, 0, "cleared", 0, (PH_ORDER){0}, a));
 	assert(a->count == 1);
 	assert(!ph_clear(s, a->items[0].id));
 	assert(!ph_begin(s));
@@ -96,7 +254,7 @@ int main(int argc, char **argv)
 	e.timestamp = now + 100;
 	assert(!ph_append(s, &e));
 	assert(!ph_commit(s));
-	assert(!ph_apps(s, 0, "", 0, a));
+	assert(!ph_apps(s, 0, "", 0, (PH_ORDER){0}, a));
 	assert(!strcmp(a->items[0].path, "middle.exe"));
 	/* A repeatedly dirtied low-ID app must not starve another app's retention. */
 	assert(!ph_limits(s, 0, 3, 7, 1024));
@@ -115,7 +273,7 @@ int main(int argc, char **argv)
 		assert(!ph_commit(s));
 		assert(ph_retention(s, now + 300, 1024) >= 0);
 	}
-	assert(!ph_apps(s, 0, "retention-B", 0, a));
+	assert(!ph_apps(s, 0, "retention-B", 0, (PH_ORDER){0}, a));
 	assert(a->count == 1 && a->items[0].count <= 3);
 	assert(!ph_limits(s, 0, 200000, 7, 1024));
 	/* Exact repeats retained; different actions/rules never grouped together. */
@@ -130,7 +288,7 @@ int main(int argc, char **argv)
 		assert(!ph_append(s, &e));
 	}
 	assert(!ph_commit(s));
-	assert(!ph_apps(s, 0, "spam", 0, a));
+	assert(!ph_apps(s, 0, "spam", 0, (PH_ORDER){0}, a));
 	assert(a->count == 1 && a->items[0].count == 200000);
 	q.app = a->items[0].id;
 	q.grouped = 1;
@@ -189,7 +347,7 @@ int main(int argc, char **argv)
 	while (ph_retention(s, now + 8 * 86400, 1024) > 0)
 	{
 	}
-	assert(!ph_apps(s, 0, "", 0, a));
+	assert(!ph_apps(s, 0, "", 0, (PH_ORDER){0}, a));
 	assert(a->count == 0);
 	assert(!ph_gap(s, 7, now, "overload"));
 	assert(ph_lost(s) == 7);
@@ -211,7 +369,7 @@ int main(int argc, char **argv)
 		assert(!ph_append(s, &e));
 	}
 	assert(!ph_commit(s));
-	assert(!ph_apps(s, 0, "churn", 0, a));
+	assert(!ph_apps(s, 0, "churn", 0, (PH_ORDER){0}, a));
 	assert(a->count == 500 && a->more);
 	for (i = 0; i < 3000; i++)
 		assert(ph_retention(s, now + 1000, 1024) >= 0);

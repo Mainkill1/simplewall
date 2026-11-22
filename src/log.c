@@ -382,7 +382,8 @@ VOID _wfp_logsetoption (
 		mask |= FWPM_NET_EVENT_KEYWORD_INBOUND_MCAST | FWPM_NET_EVENT_KEYWORD_INBOUND_BCAST;
 
 	// add allowed connections monitor
-	if (!_r_config_getboolean (L"IsExcludeClassifyAllow", TRUE, NULL))
+	if (!_r_config_getboolean (L"IsExcludeClassifyAllow", TRUE, NULL) ||
+		(_r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL) && _app_packet_haswatches ()))
 		mask |= FWPM_NET_EVENT_KEYWORD_CLASSIFY_ALLOW;
 
 	// add port scanning drop connections monitor (win10 19H1+)
@@ -412,25 +413,183 @@ VOID _wfp_logsetoption (
 		_r_log (LOG_LEVEL_WARNING, NULL, L"FwpmEngineSetOption0", L"FWPM_ENGINE_MONITOR_IPSEC_CONNECTIONS", status);
 }
 
+static PR_STRING _wfp_logresolvepath (
+	_In_ PITEM_LOG_CALLBACK log
+)
+{
+	PR_STRING path, resolved, sid;
+
+	if ((log->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) && log->package_id && !RtlEqualSid (log->package_id, &SeNobodySid))
+	{
+		if (NT_SUCCESS (_r_str_fromsid (&sid, log->package_id)))
+		{
+			if (_app_package_isnotexists (sid))
+				return sid;
+
+			_r_obj_dereference (sid);
+		}
+	}
+
+	if (!(log->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) || !log->app_id)
+		return NULL;
+
+	path = _r_obj_createstring ((LPCWSTR)log->app_id);
+	resolved = _app_getnetworkapppath (path->buffer);
+	if (!resolved)
+		resolved = _r_path_dospathfromnt (&path->sr);
+
+	_r_obj_dereference (path);
+	return resolved;
+}
+
+static BOOLEAN _wfp_isservicesid (
+	_In_opt_ PSID sid
+)
+{
+	static const SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
+
+	return sid && IsValidSid (sid) && *GetSidSubAuthorityCount (sid) == 6 &&
+		!memcmp (GetSidIdentifierAuthority (sid), &nt_authority, sizeof (nt_authority)) &&
+		*GetSidSubAuthority (sid, 0) == SECURITY_SERVICE_ID_BASE_RID;
+}
+
+static BOOLEAN _wfp_log_get_service_descriptor (
+	_In_ const FWPM_FILTER0 *filter,
+	_Out_ const FWP_BYTE_BLOB **descriptor
+)
+{
+	const FWP_BYTE_BLOB *match = NULL;
+
+	*descriptor = NULL;
+
+	for (UINT32 i = 0; i < filter->numFilterConditions; i++)
+	{
+		const FWPM_FILTER_CONDITION0 *condition = &filter->filterCondition[i];
+
+		if (!IsEqualGUID (&condition->fieldKey, &FWPM_CONDITION_ALE_USER_ID))
+			continue;
+
+		if (match || condition->matchType != FWP_MATCH_EQUAL ||
+			condition->conditionValue.type != FWP_SECURITY_DESCRIPTOR_TYPE)
+			return FALSE;
+
+		match = condition->conditionValue.sd;
+
+		if (!match || !match->data || !match->size)
+			return FALSE;
+	}
+
+	*descriptor = match;
+	return match != NULL;
+}
+
+static PR_STRING _wfp_log_lookup_service_descriptor (
+	_In_ const FWP_BYTE_BLOB *descriptor
+)
+{
+	PITEM_APP app;
+	ULONG_PTR key = 0;
+	PR_STRING service = NULL;
+
+	_r_queuedlock_acquireshared (&lock_apps);
+
+	while (_r_obj_enumhashtablepointer (apps_table, (PVOID_PTR)&app, NULL, &key))
+	{
+		if (app->type != DATA_APP_SERVICE || !app->bytes ||
+			RtlLengthSecurityDescriptor (app->bytes->buffer) != descriptor->size ||
+			memcmp (app->bytes->buffer, descriptor->data, descriptor->size))
+			continue;
+
+		if (service)
+		{
+			_r_obj_dereference (service);
+			service = NULL;
+			break;
+		}
+
+		service = _r_obj_reference (app->original_path);
+	}
+
+	_r_queuedlock_releaseshared (&lock_apps);
+	return service;
+}
+
+static PR_STRING _wfp_log_get_filter_service (
+	_In_ const FWPM_FILTER0 *filter
+)
+{
+	static SRWLOCK cache_lock = SRWLOCK_INIT;
+	static struct
+	{
+		UINT64 id;
+		GUID key;
+		PR_STRING service;
+	} cache[256];
+	const FWP_BYTE_BLOB *descriptor;
+	PR_STRING service = NULL, previous;
+	ULONG index = (ULONG)(filter->filterId % RTL_NUMBER_OF (cache));
+
+	AcquireSRWLockShared (&cache_lock);
+
+	// Runtime filter IDs can be reused after BFE restarts.
+	if (cache[index].id == filter->filterId && IsEqualGUID (&cache[index].key, &filter->filterKey))
+	{
+		service = _r_obj_referencesafe (cache[index].service);
+		ReleaseSRWLockShared (&cache_lock);
+		return service;
+	}
+
+	ReleaseSRWLockShared (&cache_lock);
+
+	if (_wfp_log_get_service_descriptor (filter, &descriptor))
+	{
+		service = _wfp_log_lookup_service_descriptor (descriptor);
+
+		if (!service)
+			return NULL; // The Services tab may still be populating.
+	}
+
+	AcquireSRWLockExclusive (&cache_lock);
+	previous = cache[index].service;
+	cache[index].id = filter->filterId;
+	cache[index].key = filter->filterKey;
+	cache[index].service = _r_obj_referencesafe (service);
+	ReleaseSRWLockExclusive (&cache_lock);
+
+	if (previous)
+		_r_obj_dereference (previous);
+
+	return service;
+}
+
 VOID CALLBACK _wfp_logcallback (
 	_In_ PITEM_LOG_CALLBACK log
 )
 {
-	PR_STRING filter_name = NULL, layer_name, path, sid_string = NULL;
+	PR_STRING filter_name = NULL, layer_name = NULL, watched_path = NULL;
 	FWPM_FILTER0 *filter_ptr = NULL;
 	FWPM_LAYER0 *layer_ptr = NULL;
 	PITEM_LOG ptr_log;
 	WCHAR buffer[0x80];
 	GUID layer_guid;
 	ULONG filter_weight = 0;
-	BOOLEAN is_myprovider = FALSE;
+	BOOLEAN is_myprovider = FALSE, is_selective_allow;
 	ULONG status;
 
 	if ((log->filter_id) == 0 || (log->layer_id) == 0)
 		return;
 
-	if (log->is_allow && _r_config_getboolean (L"IsExcludeClassifyAllow", TRUE, NULL))
-		return;
+	is_selective_allow = log->is_allow && _r_config_getboolean (L"IsExcludeClassifyAllow", TRUE, NULL);
+
+	if (is_selective_allow)
+	{
+		if (!_r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL) || !_app_packet_haswatches ())
+			return;
+
+		watched_path = _wfp_logresolvepath (log);
+		if (!watched_path || !_app_packet_iswatched (watched_path->buffer))
+			goto CleanupExit;
+	}
 
 	status = FwpmLayerGetById0 (_wfp_getenginehandle (), log->layer_id, &layer_ptr);
 
@@ -439,14 +598,14 @@ VOID CALLBACK _wfp_logcallback (
 		if (status != ERROR_SUCCESS && status != FWP_E_LAYER_NOT_FOUND)
 			_r_log (LOG_LEVEL_WARNING, NULL, L"FwpmLayerGetById0", NULL, status);
 
-		return;
+		goto CleanupExit;
 	}
 
 	// do not process when tcp connection has been established, or when non-tcp traffic has been authorized
 	if (IsEqualGUID (&layer_ptr->layerKey, &FWPM_LAYER_ALE_FLOW_ESTABLISHED_V4) || IsEqualGUID (&layer_ptr->layerKey, &FWPM_LAYER_ALE_FLOW_ESTABLISHED_V6))
 	{
 		FwpmFreeMemory0 ((PVOID_PTR)&layer_ptr);
-		return;
+		goto CleanupExit;
 	}
 
 	if (IsEqualGUID (&layer_ptr->layerKey, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4) || IsEqualGUID (&layer_ptr->layerKey, &FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6))
@@ -464,7 +623,7 @@ VOID CALLBACK _wfp_logcallback (
 		if (status != ERROR_SUCCESS && status != FWP_E_FILTER_NOT_FOUND)
 			_r_log (LOG_LEVEL_WARNING, NULL, L"FwpmFilterGetById0", NULL, status);
 
-		return;
+		goto CleanupExit;
 	}
 
 	layer_name = _wfp_getlayername (&layer_guid);
@@ -501,18 +660,20 @@ VOID CALLBACK _wfp_logcallback (
 			is_myprovider = TRUE;
 	}
 
-	FwpmFreeMemory0 ((PVOID_PTR)&filter_ptr);
+	if (is_selective_allow && !is_myprovider)
+		goto CleanupExit;
 
 	// Bound queued and in-flight capture objects independently of the UI.
- SIZE_T capture_bytes=sizeof(ITEM_LOG)+4096;
- if(log->app_id)capture_bytes+=wcslen((LPCWSTR)log->app_id)*sizeof(WCHAR)*2;
- if(filter_name)capture_bytes+=filter_name->length;
- if(layer_name)capture_bytes+=layer_name->length;
- if(!_app_packet_capture_reserve(capture_bytes)){
-  if(filter_name)_r_obj_dereference(filter_name);
-  if(layer_name)_r_obj_dereference(layer_name);
-  return;
- }
+	SIZE_T capture_bytes = sizeof (ITEM_LOG) + 4096;
+	if (log->app_id)
+		capture_bytes += wcslen ((LPCWSTR)log->app_id) * sizeof (WCHAR) * 2;
+	if (filter_name)
+		capture_bytes += filter_name->length;
+	if (layer_name)
+		capture_bytes += layer_name->length;
+	if (!_app_packet_capture_reserve (capture_bytes))
+		goto CleanupExit;
+
 	// allocate log object
 	ptr_log = (PITEM_LOG)_r_obj_allocate (sizeof (ITEM_LOG), &_app_dereferencelog);
 
@@ -520,52 +681,28 @@ VOID CALLBACK _wfp_logcallback (
 
 	// copy date and time
 	ptr_log->timestamp = _r_unixtime_from_filetime (&log->timestamp);
+	ptr_log->event_time = log->timestamp;
 
-	// check token for null (not an appcontainer) (HACK!!!)
-	if ((log->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) == FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET && log->package_id)
-	{
-		if (RtlEqualSid (log->package_id, &SeNobodySid))
-		{
-			log->flags &= ~(FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET);
-			log->package_id = NULL;
-		}
-	}
-
-	// get package id (win8+)
-	if ((log->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) == FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET && log->package_id)
-	{
-		if (NT_SUCCESS (_r_str_fromsid (&sid_string, log->package_id)))
-		{
-			if (!_app_package_isnotexists (sid_string))
-				_r_obj_clearreference ((PVOID_PTR)&sid_string);
-		}
-	}
-
-	// copy converted nt device path into win32
-	if ((log->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) == FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET && sid_string)
-	{
-		_r_obj_swapreference ((PVOID_PTR)&ptr_log->path, sid_string);
-
+	ptr_log->path = watched_path ? watched_path : _wfp_logresolvepath (log);
+	watched_path = NULL;
+	if (ptr_log->path)
 		ptr_log->app_hash = _r_str_gethash (&ptr_log->path->sr, TRUE);
-	}
-	else if ((log->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) == FWPM_NET_EVENT_FLAG_APP_ID_SET && log->app_id)
-	{
-		path = _r_obj_createstring ((LPCWSTR)(log->app_id));
-
-		_r_obj_movereference ((PVOID_PTR)&ptr_log->path, _r_path_dospathfromnt (&path->sr));
-
-		ptr_log->app_hash = _r_str_gethash (&ptr_log->path->sr, TRUE);
-
-		_r_obj_dereference (path);
-	}
-	else
-	{
-		ptr_log->app_hash = 0;
-	}
 
 	// get username information
 	if ((log->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) == FWPM_NET_EVENT_FLAG_USER_ID_SET && log->user_id)
 		_r_sys_getusername (&ptr_log->username, log->user_id, TRUE);
+
+	if (is_myprovider && ptr_log->path && _app_packet_issvchost (ptr_log->path->buffer) &&
+		_r_config_getboolean (L"IsLogUiEnabled", FALSE, NULL))
+	{
+		if (_wfp_isservicesid (log->user_id))
+			_r_sys_getusername (&ptr_log->service, log->user_id, FALSE);
+
+		if (!ptr_log->service)
+			ptr_log->service = _wfp_log_get_filter_service (filter_ptr);
+	}
+
+	FwpmFreeMemory0 ((PVOID_PTR)&filter_ptr);
 
 	// destination
 	if ((log->flags & FWPM_NET_EVENT_FLAG_IP_VERSION_SET) == FWPM_NET_EVENT_FLAG_IP_VERSION_SET)
@@ -635,12 +772,32 @@ VOID CALLBACK _wfp_logcallback (
 
 	ptr_log->filter_name = filter_name;
 	ptr_log->layer_name = layer_name;
+	filter_name = layer_name = NULL;
 
-	_app_packet_submit(ptr_log);
-	_r_workqueue_queueitem (&log_queue, &_app_logthread, ptr_log);
+	_app_packet_submit (ptr_log);
 
-	if (sid_string)
-		_r_obj_dereference (sid_string);
+	// Per-app monitoring feeds packet history only.
+	if (is_selective_allow)
+	{
+		_app_packet_capture_release (ptr_log->capture_bytes);
+		_r_obj_dereference (ptr_log);
+	}
+	else
+	{
+		_r_workqueue_queueitem (&log_queue, &_app_logthread, ptr_log);
+	}
+
+CleanupExit:
+
+	if (filter_ptr)
+		FwpmFreeMemory0 ((PVOID_PTR)&filter_ptr);
+
+	if (filter_name)
+		_r_obj_dereference (filter_name);
+	if (layer_name)
+		_r_obj_dereference (layer_name);
+	if (watched_path)
+		_r_obj_dereference (watched_path);
 }
 
 FORCEINLINE BOOLEAN log_struct_to_f (
@@ -1283,6 +1440,95 @@ VOID CALLBACK _wfp_logcallback4 (
 		_wfp_logcallback (&log);
 }
 
+// The tray menu and application discovery use this policy on the main window thread.
+static struct
+{
+	UINT command;
+	LONG duration;
+	ULONGLONG deadline;
+	FILETIME started;
+} new_app_policy;
+
+UINT _app_log_newapps_active (VOID)
+{
+	return GetTickCount64 () < new_app_policy.deadline ? new_app_policy.command : 0;
+}
+
+VOID _app_log_newapps_set (
+	_In_ UINT command
+)
+{
+	static const LONG durations[] = {60, 300, 900};
+	if (command < IDM_TRAY_ALLOWNEW_TEMP_1 || command > IDM_TRAY_ALLOWNEW_PERM_15)
+	{
+		new_app_policy.command = 0;
+		new_app_policy.deadline = 0;
+		return;
+	}
+
+	UINT choice = (command - IDM_TRAY_ALLOWNEW_TEMP_1) % RTL_NUMBER_OF (durations);
+	LONG seconds = durations[choice];
+	GetSystemTimeAsFileTime (&new_app_policy.started);
+	new_app_policy.deadline = GetTickCount64 () + (ULONGLONG)seconds * 1000;
+	new_app_policy.duration = command >= IDM_TRAY_ALLOWNEW_PERM_1 ? -1 : seconds;
+	new_app_policy.command = command;
+}
+
+static LONG _app_log_newapp_duration (
+	_In_ PITEM_LOG log,
+	_In_ BOOLEAN is_created
+)
+{
+	if (!is_created || log->is_allow || !log->is_myprovider || !new_app_policy.command ||
+		GetTickCount64 () >= new_app_policy.deadline || CompareFileTime (&log->event_time, &new_app_policy.started) < 0)
+		return 0;
+
+	return new_app_policy.duration;
+}
+
+BOOLEAN _app_log_discoverapp (
+	_In_ HWND hwnd,
+	_Inout_ PITEM_LOG log
+)
+{
+	BOOLEAN created, allowed = FALSE;
+	PITEM_APP app = _app_addapplication_ex (hwnd, DATA_UNKNOWN, log->path, NULL, NULL, &created);
+	if (!app)
+		return FALSE;
+
+	log->app_hash = app->app_hash;
+	LONG duration = _app_log_newapp_duration (log, created);
+	if (duration && _wfp_isfiltersinstalled () && !_wfp_isfiltersapplying ())
+	{
+		if (duration > 0)
+			_app_timer_set (NULL, app, duration);
+		else
+			app->is_enabled = TRUE;
+
+		if (app->is_enabled)
+		{
+			PR_LIST apps = _r_obj_createlist (1, NULL);
+			_r_obj_addlistitem (apps, app, NULL);
+			allowed = _wfp_createappfilters (_wfp_getenginehandle (), apps, DBG_ARG, FALSE) && !app->is_haveerrors;
+			_r_obj_dereference (apps);
+
+			if (!allowed)
+				_app_timer_reset (NULL, app, TRUE);
+
+			_app_listview_updateitemby_param (hwnd, app->app_hash, TRUE);
+		}
+	}
+
+	if (created)
+	{
+		_app_listview_updateby_id (hwnd, app->type, PR_UPDATE_TYPE);
+		_app_profile_requestsave (hwnd);
+	}
+
+	_r_obj_dereference (app);
+	return allowed;
+}
+
 VOID NTAPI _app_logthread (
 	_In_ PVOID arglist
 )
@@ -1290,7 +1536,7 @@ VOID NTAPI _app_logthread (
 	PITEM_APP ptr_app = NULL;
 	PITEM_LOG ptr_log;
 	HWND hwnd;
-	BOOLEAN is_exludeallow, is_exludeblocklist, is_exludestealth, is_logenabled, is_loguienabled, is_notexist, is_notificationenabled, is_silent = FALSE;
+	BOOLEAN is_exludeallow, is_exludeblocklist, is_exludestealth, is_logenabled, is_loguienabled, is_notexist, is_notificationenabled, is_silent = FALSE, is_autoallowed = FALSE;
 
 	hwnd = _r_app_gethwnd ();
 
@@ -1301,16 +1547,16 @@ VOID NTAPI _app_logthread (
 
 	if (is_notexist)
 	{
-		ptr_app = _app_addapplication (hwnd, DATA_UNKNOWN, ptr_log->path, NULL, NULL);
-
-		if (ptr_app)
+		if (hwnd)
+			is_autoallowed = (BOOLEAN)SendMessageW (hwnd, RM_LOG_DISCOVER_APP, 0, (LPARAM)ptr_log);
+		else
 		{
-			ptr_log->app_hash = ptr_app->app_hash;
-
-			if (hwnd)
-				_app_listview_updateby_id (hwnd, ptr_app->type, PR_UPDATE_TYPE);
-
-			_app_profile_requestsave (hwnd);
+			ptr_app = _app_addapplication (NULL, DATA_UNKNOWN, ptr_log->path, NULL, NULL);
+			if (ptr_app)
+			{
+				ptr_log->app_hash = ptr_app->app_hash;
+				_app_profile_requestsave (NULL);
+			}
 		}
 	}
 
@@ -1331,7 +1577,7 @@ VOID NTAPI _app_logthread (
 		ptr_log->local_addr_str = _app_formataddress (ptr_log->af, ptr_log->protocol, &ptr_log->local_addr, 0, 0);
 
 		// display notification
-		if (is_notificationenabled && ptr_app && ptr_log->is_myprovider && !ptr_log->is_allow && is_exludeblocklist)
+		if (is_notificationenabled && !is_autoallowed && ptr_app && ptr_log->is_myprovider && !ptr_log->is_allow && is_exludeblocklist)
 		{
 			if (_app_getappinfo (ptr_app, INFO_IS_SILENT, &is_silent, sizeof (BOOLEAN)) && !is_silent)
 				_app_notify_addobject (hwnd, ptr_log, ptr_app);

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([int]$TargetProcessId,[switch]$RequireHistory,[string]$ResultPath='C:\Users\Public\simplewall-build\packet-history-ui-results.json')
+param([int]$TargetProcessId,[switch]$RequireHistory,[switch]$RequireRules,[string]$ResultPath='C:\Users\Public\simplewall-build\packet-history-ui-results.json')
 $ErrorActionPreference='Stop'
 Add-Type @'
 using System;
@@ -9,6 +9,7 @@ public static class PacketHistoryUi {
  [DllImport("user32.dll")]public static extern bool EnumWindows(Callback c,IntPtr p);
  [DllImport("user32.dll")]public static extern uint GetWindowThreadProcessId(IntPtr w,out uint p);
  [DllImport("user32.dll")]public static extern IntPtr GetDlgItem(IntPtr w,int id);
+ [DllImport("user32.dll")]public static extern IntPtr GetWindow(IntPtr w,uint relation);
  [DllImport("user32.dll")]public static extern IntPtr SendMessageTimeout(IntPtr w,uint m,IntPtr a,IntPtr b,uint flags,uint timeout,out IntPtr result);
 
  [DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr OpenProcess(uint access,bool inherit,uint id);
@@ -28,6 +29,26 @@ function Send([IntPtr]$w,[uint32]$m,[long]$a=0,[long]$b=0){$r=[IntPtr]::Zero;if(
 if($TargetProcessId){$app=Get-Process -Id $TargetProcessId}else{$app=Get-Process simplewall|Select-Object -First 1}
 $main=[PacketHistoryUi]::Find($app.Id)
 $panel=[PacketHistoryUi]::GetDlgItem($main,113)
+$tab=[PacketHistoryUi]::GetDlgItem($main,105)
+if($panel -eq [IntPtr]::Zero -or $tab -eq [IntPtr]::Zero){throw 'The packet history panel or tab control is missing'}
+for($w=[PacketHistoryUi]::GetWindow($main,5);$w -ne [IntPtr]::Zero -and $w -ne $panel;$w=[PacketHistoryUi]::GetWindow($w,2)){
+ if($w -eq $tab){throw 'The tab control overlaps the packet history panel'}
+}
+$ruleRows=[ordered]@{}
+if($RequireRules){
+ foreach($id in @(109,110,111)){
+  $rules=[PacketHistoryUi]::GetDlgItem($main,$id)
+  if($rules -eq [IntPtr]::Zero){throw "Rule list $id is missing"}
+  for($wait=0;$wait -lt 50;$wait++){
+   $count=Send $rules 4100
+   if($count -gt 0){break}
+   Start-Sleep -Milliseconds 100
+  }
+  if($count -lt 1){throw "Rule list $id has no rows after profile load"}
+  if(-not [PacketHistoryUi]::Cell($rules,0,0)){throw "Rule list $id has no name in its first row"}
+  $ruleRows[[string]$id]=$count
+ }
+}
 foreach($id in @(6100,6101,6102,6103,6104,6105,6106,6107,6108,6109,6110,6111,6112,6115,6116,6117)){
  if([PacketHistoryUi]::GetDlgItem($panel,$id) -eq [IntPtr]::Zero){throw "Split-view control $id missing"}
 }
@@ -64,6 +85,9 @@ try{
   [void](Send $group 241 ($i%2))
   [void](Send $panel 273 6105)
   [void](Send $panel 273 (6102+($i%2)))
+  foreach($id in @(6116,6117)){
+   if([PacketHistoryUi]::Text([PacketHistoryUi]::GetDlgItem($panel,$id)) -match '^Loading'){throw "Packet refresh displayed a loading notice in control $id"}
+  }
   $watch=[Diagnostics.Stopwatch]::StartNew();[void](Send $main 0);$timings+=$watch.Elapsed.TotalMilliseconds
  }
  Start-Sleep -Seconds 2
@@ -71,6 +95,6 @@ try{
  if($rows -gt 500){throw "Page contains $rows rows; expected at most 500"}
  $max=($timings|Measure-Object -Maximum).Maximum
  if($max -ge 100){throw "UI probe exceeded target: $max ms"}
- [PSCustomObject]@{process=$app.Id;split_controls=$true;page_rows=$rows;rapid_filter_switches=20;live_history_checked=[bool]$RequireHistory;selection_stable=[bool]$RequireHistory;probe_max_ms=$max;sha256=(Get-FileHash $app.Path).Hash}|ConvertTo-Json|Set-Content $ResultPath
+ [PSCustomObject]@{process=$app.Id;split_controls=$true;page_rows=$rows;rule_rows=$ruleRows;rapid_filter_switches=20;live_history_checked=[bool]$RequireHistory;selection_stable=[bool]$RequireHistory;probe_max_ms=$max;sha256=(Get-FileHash $app.Path).Hash}|ConvertTo-Json|Set-Content $ResultPath
  Get-Content $ResultPath
 }finally{[void](Send $group 241 $original);[void](Send $panel 273 6105);[void](Send $panel 273 6102)}

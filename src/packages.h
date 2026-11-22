@@ -34,3 +34,9 @@ VOID _app_package_getpackageslist (
 VOID _app_package_getserviceslist (
 	_In_opt_ HWND hwnd
 );
+
+LPENUM_SERVICE_STATUS_PROCESS _app_package_enumservices (
+	_In_opt_ HWND hwnd,
+	_In_ BOOLEAN include_instances,
+	_Out_ PULONG count
+);

@@ -39,6 +39,19 @@ typedef ULONG (WINAPI *FWPMNES1)(
 	_Out_ PHANDLE events_handle
 	);
 
+#define RM_LOG_DISCOVER_APP (WM_APP + 107)
+
+UINT _app_log_newapps_active (VOID);
+
+VOID _app_log_newapps_set (
+	_In_ UINT command
+);
+
+BOOLEAN _app_log_discoverapp (
+	_In_ HWND hwnd,
+	_Inout_ PITEM_LOG log
+);
+
 VOID _app_loginit (
 	_In_ BOOLEAN is_install
 );

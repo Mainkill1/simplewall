@@ -454,23 +454,17 @@ VOID _app_package_getpackageslist (
 	}
 }
 
-VOID _app_package_getserviceslist (
-	_In_opt_ HWND hwnd
+LPENUM_SERVICE_STATUS_PROCESS _app_package_enumservices (
+	_In_opt_ HWND hwnd,
+	_In_ BOOLEAN include_instances,
+	_Out_ PULONG count
 )
 {
-	PR_STRING converted_path, name_string, service_name, service_path;
-	LPENUM_SERVICE_STATUS_PROCESS service, services;
-	PVOID buffer, service_sd = NULL;
-	R_STRINGREF dummy_filename;
-	WCHAR general_key[0x100];
-	PR_BYTE service_sid;
-	EXPLICIT_ACCESS ea;
-	PITEM_APP ptr_app;
+	PVOID buffer;
 	SC_HANDLE hsvcmgr;
-	HANDLE hkey;
-	LONG64 service_timestamp;
-	ULONG buffer_size, return_length, sd_length, services_returned, service_type = SERVICE_WIN32_OWN_PROCESS | SERVICE_WIN32_SHARE_PROCESS;
-	NTSTATUS status;
+	ULONG buffer_size, return_length, service_type = SERVICE_WIN32_OWN_PROCESS | SERVICE_WIN32_SHARE_PROCESS;
+
+	*count = 0;
 
 	hsvcmgr = OpenSCManagerW (NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE);
 
@@ -485,7 +479,7 @@ VOID _app_package_getserviceslist (
 			_r_log (LOG_LEVEL_ERROR, NULL, L"OpenSCManagerW", NULL, NtLastError ());
 		}
 
-		return;
+		return NULL;
 	}
 
 	// win10+
@@ -493,14 +487,14 @@ VOID _app_package_getserviceslist (
 	{
 		service_type |= SERVICE_INTERACTIVE_PROCESS | SERVICE_USER_SERVICE;
 
-		if (_r_config_getboolean (L"IsCollectUserServiceInstance", FALSE, NULL))
+		if (include_instances || _r_config_getboolean (L"IsCollectUserServiceInstance", FALSE, NULL))
 			service_type |= SERVICE_USERSERVICE_INSTANCE;
 	}
 
 	buffer_size = PR_SIZE_BUFFER;
 	buffer = _r_mem_allocate (buffer_size);
 
-	if (!EnumServicesStatusExW (hsvcmgr, SC_ENUM_PROCESS_INFO, service_type, SERVICE_STATE_ALL, (PBYTE)buffer, buffer_size, &return_length, &services_returned, NULL, NULL))
+	if (!EnumServicesStatusExW (hsvcmgr, SC_ENUM_PROCESS_INFO, service_type, SERVICE_STATE_ALL, (PBYTE)buffer, buffer_size, &return_length, count, NULL, NULL))
 	{
 		if (NtLastError () == ERROR_MORE_DATA)
 		{
@@ -509,7 +503,7 @@ VOID _app_package_getserviceslist (
 			buffer = _r_mem_reallocate (buffer, buffer_size);
 
 			// now query again for services
-			if (!EnumServicesStatusExW (hsvcmgr, SC_ENUM_PROCESS_INFO, service_type, SERVICE_STATE_ALL, (PBYTE)buffer, buffer_size, &return_length, &services_returned, NULL, NULL))
+			if (!EnumServicesStatusExW (hsvcmgr, SC_ENUM_PROCESS_INFO, service_type, SERVICE_STATE_ALL, (PBYTE)buffer, buffer_size, &return_length, count, NULL, NULL))
 			{
 				_r_mem_free (buffer); // cleanup!
 
@@ -524,14 +518,32 @@ VOID _app_package_getserviceslist (
 		}
 	}
 
-	if (!buffer)
-	{
-		CloseServiceHandle (hsvcmgr);
-		return;
-	}
+	CloseServiceHandle (hsvcmgr);
+	return buffer;
+}
+
+VOID _app_package_getserviceslist (
+	_In_opt_ HWND hwnd
+)
+{
+	PR_STRING converted_path, name_string, service_name, service_path;
+	LPENUM_SERVICE_STATUS_PROCESS service, services;
+	PVOID service_sd = NULL;
+	R_STRINGREF dummy_filename;
+	WCHAR general_key[0x100];
+	PR_BYTE service_sid;
+	EXPLICIT_ACCESS ea;
+	PITEM_APP ptr_app;
+	HANDLE hkey;
+	LONG64 service_timestamp;
+	ULONG sd_length, services_returned, service_type;
+	NTSTATUS status;
 
 	// now traverse each service to get information
-	services = (LPENUM_SERVICE_STATUS_PROCESS)buffer;
+	services = _app_package_enumservices (hwnd, FALSE, &services_returned);
+
+	if (!services)
+		return;
 
 	for (ULONG i = 0; i < services_returned; i++)
 	{
@@ -625,7 +637,5 @@ VOID _app_package_getserviceslist (
 		NtClose (hkey);
 	}
 
-	CloseServiceHandle (hsvcmgr);
-
-	_r_mem_free (buffer);
+	_r_mem_free (services);
 }

@@ -3,6 +3,8 @@
 
 #include "global.h"
 
+#define TIMER_EXIT_WHEN_IDLE 0x535704
+
 BOOLEAN _app_changefilters (
 	_In_ HWND hwnd,
 	_In_ BOOLEAN is_install,
@@ -1362,6 +1364,8 @@ INT_PTR CALLBACK SettingsProc (
 					BOOLEAN is_enabled = _r_button_ischecked (hwnd, ctrl_id);
 
 					_r_config_setboolean (L"IsLogUiEnabled", is_enabled, NULL);
+					if (_app_packet_haswatches ())
+						_wfp_logsetoption (_wfp_getenginehandle ());
 
 					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, IDM_TRAY_ENABLEUILOG_CHK, is_enabled);
 
@@ -1958,6 +1962,8 @@ INT_PTR CALLBACK DlgProc (
 	_In_ LPARAM lparam
 )
 {
+	static BOOLEAN exit_pending;
+
 	switch (msg)
 	{
 		case WM_INITDIALOG:
@@ -2073,6 +2079,9 @@ INT_PTR CALLBACK DlgProc (
 
 		case RM_CONFIG_UPDATE:
 		{
+			_app_packet_reloadwatches ();
+			_wfp_logsetoption (_wfp_getenginehandle ());
+
 			_app_profile_load (hwnd, NULL);
 
 			_app_changefilters (hwnd, TRUE, FALSE);
@@ -2082,6 +2091,9 @@ INT_PTR CALLBACK DlgProc (
 
 		case RM_CONFIG_RESET:
 		{
+			_app_packet_reloadwatches ();
+			_wfp_logsetoption (_wfp_getenginehandle ());
+
 			_r_queuedlock_acquireexclusive (&lock_rules_config);
 			_r_obj_clearhashtable (rules_config);
 			_r_queuedlock_releaseexclusive (&lock_rules_config);
@@ -2164,6 +2176,14 @@ INT_PTR CALLBACK DlgProc (
 			return 0;
 		}
 
+		case RM_LOG_DISCOVER_APP:
+		{
+			BOOLEAN allowed = _app_log_discoverapp (hwnd, (PITEM_LOG)lparam);
+
+			SetWindowLongPtrW (hwnd, DWLP_MSGRESULT, allowed);
+			return TRUE;
+		}
+
 		case RM_REFRESH_COMPLETE:
 		{
 			PITEM_TAB_CONTEXT tab_context = _app_listview_getcontext (hwnd, INT_ERROR);
@@ -2211,6 +2231,15 @@ INT_PTR CALLBACK DlgProc (
 
 		case WM_TIMER:
 		{
+			if (wparam == TIMER_EXIT_WHEN_IDLE)
+			{
+				if (!InterlockedCompareExchange ((volatile LONG *)&wfp_queue.busy_count, 0, 0))
+				{
+					KillTimer (hwnd, TIMER_EXIT_WHEN_IDLE);
+					DestroyWindow (hwnd);
+				}
+				return TRUE;
+			}
 			if (wparam == TIMER_PROFILE_SAVE)
 			{
 				KillTimer (hwnd, TIMER_PROFILE_SAVE);
@@ -2249,6 +2278,9 @@ INT_PTR CALLBACK DlgProc (
 			LPCWSTR cfg_name;
 			UINT locale_id;
 
+			if (exit_pending)
+				return TRUE;
+
 			if (_wfp_isfiltersinstalled ())
 			{
 				if (_app_istimersactive ())
@@ -2270,7 +2302,22 @@ INT_PTR CALLBACK DlgProc (
 				}
 			}
 
+			// Filter workers send synchronous messages to this window while finishing.
+			if (InterlockedCompareExchange ((volatile LONG *)&wfp_queue.busy_count, 0, 0))
+			{
+				exit_pending = SetTimer (hwnd, TIMER_EXIT_WHEN_IDLE, 100, NULL) != 0;
+				return TRUE;
+			}
+
 			DestroyWindow (hwnd);
+
+			break;
+		}
+
+		case WM_ENDSESSION:
+		{
+			if (wparam)
+				_app_packet_stop_audit_timer();
 
 			break;
 		}
@@ -2282,12 +2329,7 @@ INT_PTR CALLBACK DlgProc (
 			_app_network_stop ();
 			_app_loginit (FALSE);
 
-			if (_r_queuedlock_islocked (&lock_apply))
-			{
-				_r_workqueue_waitforfinish (&wfp_queue);
-				_r_workqueue_destroy (&wfp_queue);
-			}
-
+			_r_workqueue_destroy (&wfp_queue);
 			_app_profile_flushsave (hwnd);
 			_r_tray_destroy (hwnd, &GUID_TrayIcon);
 
@@ -3320,6 +3362,9 @@ INT_PTR CALLBACK DlgProc (
 				{
 					BOOLEAN new_val = _r_config_invertboolean (L"IsLogUiEnabled", FALSE, NULL);
 
+					if (_app_packet_haswatches ())
+						_wfp_logsetoption (_wfp_getenginehandle ());
+
 					_app_toolbar_setchecked (config.hrebar, IDC_TOOLBAR, ctrl_id, new_val);
 
 					break;
@@ -3391,6 +3436,24 @@ INT_PTR CALLBACK DlgProc (
 					break;
 				}
 
+				case IDM_TRAY_ALLOWNEW_TEMP_1:
+				case IDM_TRAY_ALLOWNEW_TEMP_5:
+				case IDM_TRAY_ALLOWNEW_TEMP_15:
+				case IDM_TRAY_ALLOWNEW_PERM_1:
+				case IDM_TRAY_ALLOWNEW_PERM_5:
+				case IDM_TRAY_ALLOWNEW_PERM_15:
+				{
+					if (_wfp_isfiltersinstalled () && !_wfp_isfiltersapplying ())
+						_app_log_newapps_set (ctrl_id);
+					break;
+				}
+
+				case IDM_TRAY_ALLOWNEW_STOP:
+				{
+					_app_log_newapps_set (0);
+					break;
+				}
+
 				case IDM_TRAY_START:
 				{
 					BOOLEAN is_filtersinstalled;
@@ -3401,7 +3464,11 @@ INT_PTR CALLBACK DlgProc (
 					is_filtersinstalled = !_wfp_isfiltersinstalled ();
 
 					if (_app_installmessage (hwnd, is_filtersinstalled))
+					{
+						if (!is_filtersinstalled)
+							_app_log_newapps_set (0);
 						_app_changefilters (hwnd, is_filtersinstalled, TRUE);
+					}
 
 					break;
 				}

@@ -870,6 +870,21 @@ VOID _app_message_traycontextmenu (
 
 	install_type = _wfp_getinstalltype ();
 
+	HMENU allow_new = GetSubMenu (hsubmenu, ALLOW_NEW_APPS_ID);
+	if (allow_new)
+	{
+		UINT active = _app_log_newapps_active ();
+		if (active)
+		{
+			HMENU mode = GetSubMenu (allow_new, active >= IDM_TRAY_ALLOWNEW_PERM_1 ? 1 : 0);
+			CheckMenuItem (mode, active, MF_BYCOMMAND | MF_CHECKED);
+		}
+
+		EnableMenuItem (allow_new, IDM_TRAY_ALLOWNEW_STOP, MF_BYCOMMAND | (active ? MF_ENABLED : MF_GRAYED));
+		if (install_type == INSTALL_DISABLED || _wfp_isfiltersapplying ())
+			EnableMenuItem (hsubmenu, ALLOW_NEW_APPS_ID, MF_BYPOSITION | MF_GRAYED);
+	}
+
 	_r_menu_setitembitmap (hsubmenu, IDM_TRAY_START, FALSE, _app_getstatebitmap (install_type));
 
 	// localize
@@ -1267,14 +1282,7 @@ VOID _app_displayinforule_callback (
 			}
 			else
 			{
-				if (ptr_rule->is_enabled)
-				{
-					lpnmlv->item.iGroupId = (ptr_rule->is_fordriver || ptr_rule->is_forservice || !_r_obj_isempty (ptr_rule->apps)) ? 1 : 0;
-				}
-				else
-				{
-					lpnmlv->item.iGroupId = 2;
-				}
+				lpnmlv->item.iGroupId = _app_listview_getrulegroup (ptr_rule, FALSE);
 			}
 		}
 	}
@@ -1653,7 +1661,7 @@ BOOLEAN _app_message_displayinfo (
 	PITEM_LOG ptr_log;
 	ULONG_PTR index;
 
-	index = _app_listview_getitemcontext (hwnd, listview_id, lpnmlv->item.iItem);
+	index = lpnmlv->item.lParam ? _app_listview_getcontextcode (lpnmlv->item.lParam) : _app_listview_getitemcontext (hwnd, listview_id, lpnmlv->item.iItem);
 
 	switch (listview_id)
 	{

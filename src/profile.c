@@ -411,28 +411,58 @@ PITEM_APP _app_addapplication (
 	_In_opt_ PR_STRING real_path
 )
 {
+	return _app_addapplication_ex (hwnd, type, path, display_name, real_path, NULL);
+}
+
+_Ret_maybenull_
+PITEM_APP _app_addapplication_ex (
+	_In_opt_ HWND hwnd,
+	_In_ ENUM_TYPE_DATA type,
+	_In_ PR_STRING path,
+	_In_opt_ PR_STRING display_name,
+	_In_opt_ PR_STRING real_path,
+	_Out_opt_ PBOOLEAN is_created
+)
+{
 	WCHAR path_full[0x400];
 	R_STRINGREF path_sr;
+	PR_STRING network_path = NULL;
 	PITEM_APP ptr_app;
 	ULONG app_hash;
 	BOOLEAN is_ntoskrnl;
 
-	if (_r_obj_isstringempty2 (path) || (_app_isappvalidpath (path) && _r_fs_isdirectory (&path->sr)))
+	if (is_created)
+		*is_created = FALSE;
+
+	if (_r_obj_isstringempty (path))
 		return NULL;
 
-	_r_obj_initializestringref2 (&path_sr, &path->sr);
+	if (type != DATA_APP_UWP && type != DATA_APP_SERVICE)
+		network_path = _app_getnetworkapppath (path->buffer);
+
+	// Network paths may be unavailable. Their firewall identity needs no disk access.
+	if (!network_path && _app_isappvalidpath (path) && _r_fs_isdirectory (&path->sr))
+		return NULL;
+
+	_r_obj_initializestringref2 (&path_sr, network_path ? &network_path->sr : &path->sr);
 
 	// prevent possible duplicate apps entries with short path (issue #640)
-	if (_r_str_findchar (&path_sr, L'~', FALSE) != SIZE_MAX)
+	if (!network_path && _r_str_findchar (&path_sr, L'~', FALSE) != SIZE_MAX)
 	{
-		if (GetLongPathNameW (path_sr.buffer, path_full, RTL_NUMBER_OF (path_full)))
+		ULONG length = GetLongPathNameW (path_sr.buffer, path_full, RTL_NUMBER_OF (path_full));
+		if (length && length < RTL_NUMBER_OF (path_full))
 			_r_obj_initializestringref (&path_sr, path_full);
 	}
 
 	app_hash = _r_str_gethash (&path_sr, TRUE);
 
-	if (_app_isappfound (app_hash))
-		return _app_getappitem (app_hash); // already exists
+	ptr_app = _app_getappitem (app_hash);
+	if (ptr_app)
+	{
+		if (network_path)
+			_r_obj_dereference (network_path);
+		return ptr_app;
+	}
 
 	ptr_app = (PITEM_APP)_r_obj_allocate (sizeof (ITEM_APP), &_app_dereferenceapp);
 	is_ntoskrnl = (app_hash == config.ntoskrnl_hash);
@@ -468,7 +498,7 @@ PITEM_APP _app_addapplication (
 		}
 		else
 		{
-			ptr_app->type = _r_path_isnetwork (&path_sr) ? DATA_APP_NETWORK : DATA_APP_REGULAR;
+			ptr_app->type = network_path ? DATA_APP_NETWORK : DATA_APP_REGULAR;
 		}
 
 		ptr_app->real_path = _r_obj_createstring2 (is_ntoskrnl ? &config.ntoskrnl_path->sr : &path_sr);
@@ -489,13 +519,29 @@ PITEM_APP _app_addapplication (
 		ptr_app->short_name = _r_path_getbasenamestring (&path_sr);
 	}
 
+	if (network_path)
+		_r_obj_dereference (network_path);
+
 	ptr_app->guids = _r_obj_createarray (sizeof (GUID), 0x02, NULL); // initialize guids array
 	ptr_app->timestamp = _r_unixtime_now ();
 
-	// insert object into the table
-	//_r_queuedlock_acquireexclusive (&lock_apps);
-	_r_obj_addhashtablepointer (apps_table, app_hash, ptr_app);
-	//_r_queuedlock_releaseexclusive (&lock_apps);
+	// Another discovery source may have registered this normalized identity.
+	_r_queuedlock_acquireexclusive (&lock_apps);
+	PITEM_APP existing = (PITEM_APP)_r_obj_findhashtablepointer (apps_table, app_hash);
+
+	if (!existing)
+		_r_obj_addhashtablepointer (apps_table, app_hash, _r_obj_reference (ptr_app));
+
+	_r_queuedlock_releaseexclusive (&lock_apps);
+
+	if (existing)
+	{
+		_r_obj_dereference (ptr_app);
+		return existing;
+	}
+
+	if (is_created)
+		*is_created = TRUE;
 
 	// insert item
 	if (hwnd)
@@ -505,7 +551,7 @@ PITEM_APP _app_addapplication (
 	if (!_r_obj_isstringempty (ptr_app->real_path) && _app_isappvalidbinary (ptr_app->real_path))
 		_app_getfileinformation (ptr_app->real_path, app_hash, ptr_app->type, _app_listview_getbytype (ptr_app->type));
 
-	return (PITEM_APP)_r_obj_reference (ptr_app);
+	return ptr_app;
 }
 
 PITEM_RULE _app_addrule (
@@ -943,7 +989,9 @@ VOID _app_setruleiteminfo (
 	ULONG hash_code;
 	INT item_count;
 
-	_r_listview_setitem (hwnd, listview_id, item_id, 0, LPSTR_TEXTCALLBACK, I_IMAGECALLBACK, I_GROUPIDCALLBACK, I_DEFAULT);
+	BOOLEAN is_hidden = _app_listview_isitemhidden (_r_listview_getitemlparam (hwnd, listview_id, item_id));
+
+	_r_listview_setitem (hwnd, listview_id, item_id, 0, LPSTR_TEXTCALLBACK, I_IMAGECALLBACK, _app_listview_getrulegroup (ptr_rule, is_hidden), I_DEFAULT);
 
 	_r_listview_setitemcheck (hwnd, listview_id, item_id, !!ptr_rule->is_enabled);
 

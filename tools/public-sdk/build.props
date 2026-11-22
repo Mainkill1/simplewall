@@ -3,9 +3,8 @@
     <IncludePath>$(PublicRoutineRoot)\src;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemGroup>
-    <ClCompile Remove="..\routine\src\routine.c;..\routine\src\rapp.c" />
+    <ClCompile Remove="..\routine\src\routine.c" />
     <ClCompile Include="$(PublicRoutineRoot)\src\routine.c" />
-    <ClCompile Include="$(PublicRoutineRoot)\src\rapp.c" />
     <ClCompile Update="src\*.c;src\uwp.cpp">
       <ForcedIncludeFiles>$(MSBuildThisFileDirectory)routine-compat.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
     </ClCompile>

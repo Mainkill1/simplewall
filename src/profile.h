@@ -68,6 +68,16 @@ PITEM_APP _app_addapplication (
 	_In_opt_ PR_STRING real_path
 );
 
+_Ret_maybenull_
+PITEM_APP _app_addapplication_ex (
+	_In_opt_ HWND hwnd,
+	_In_ ENUM_TYPE_DATA type,
+	_In_ PR_STRING path,
+	_In_opt_ PR_STRING display_name,
+	_In_opt_ PR_STRING real_path,
+	_Out_opt_ PBOOLEAN is_created
+);
+
 PITEM_RULE _app_addrule (
 	_In_opt_ PR_STRING name,
 	_In_opt_ PR_STRING rule_remote,

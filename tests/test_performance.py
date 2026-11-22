@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 def function(path, name):
     source = (ROOT / path).read_text(encoding='utf-8-sig')
-    pos = re.search(r'^(?:static |FORCEINLINE )?(?:BOOLEAN|VOID|INT|LONG|NTSTATUS|ULONG|PITEM_APP_INFO)(?: NTAPI| CALLBACK)? ' + re.escape(name) + r' \(', source, re.M).start()
+    pos = re.search(r'^(?:static |FORCEINLINE )?(?:BOOLEAN|VOID|INT|LONG|NTSTATUS|ULONG|PITEM_APP_INFO)(?: NTAPI| CALLBACK)? ' + re.escape(name) + r' *\(', source, re.M).start()
     start = source.rfind('\n', 0, source.rfind('\n', 0, pos)) + 1
     # Start at the return type, including a preceding static qualifier when present.
     start = source.rfind('\n', 0, pos) + 1
@@ -69,6 +69,251 @@ typedef void **PVOID_PTR;
 
 
 class PerformanceTests(unittest.TestCase):
+    def test_bits_job_matching_rejects_a_different_job_at_the_same_host(self):
+        support = COMMON + r'''
+typedef int GUID;
+typedef const char *LPCWSTR;
+static int _wcsicmp(const char *a, const char *b) { return strcmp(a,b); }
+static int IsEqualGUID(const GUID *a, const GUID *b) { return *a == *b; }
+'''
+        run_c(support, [('src/packet_process.c', 'same_bits_job')], r'''
+int main(void) {
+ GUID first = 1, second = 2;
+ assert(same_bits_job(&first, "update.example", &first, "update.example"));
+ assert(!same_bits_job(&first, "update.example", &second, "update.example"));
+ assert(!same_bits_job(&first, "update.example", &first, "other.example"));
+}
+''')
+
+    def test_blocked_audit_toggle_preserves_success_auditing(self):
+        support = COMMON + r'''
+#define POLICY_AUDIT_EVENT_SUCCESS 1
+#define POLICY_AUDIT_EVENT_FAILURE 2
+#define POLICY_AUDIT_EVENT_NONE 4
+'''
+        run_c(support, [('src/packet_process.c', 'blocked_audit_flags')], r'''
+int main(void) {
+ assert(blocked_audit_flags(4, TRUE) == 2);
+ assert(blocked_audit_flags(2, FALSE) == 4);
+ assert(blocked_audit_flags(1, TRUE) == 3);
+ assert(blocked_audit_flags(3, FALSE) == 1);
+}
+''')
+
+    def test_blocked_audit_countdown_rounds_up_until_expiration(self):
+        support = COMMON + 'typedef uint64_t ULONGLONG;\n'
+        run_c(support, [('src/packet_process.c', 'audit_timer_remaining')], r'''
+int main(void) {
+ assert(audit_timer_remaining(0, 500) == 0);
+ assert(audit_timer_remaining(60500, 500) == 60);
+ assert(audit_timer_remaining(60500, 501) == 60);
+ assert(audit_timer_remaining(60500, 60499) == 1);
+ assert(audit_timer_remaining(60500, 60500) == 0);
+ assert(audit_timer_remaining(60500, 60501) == 0);
+ assert(audit_timer_remaining(86400500, 500) == 86400);
+ assert(audit_timer_remaining(86400500, 43200500) == 43200);
+}
+''')
+
+    def test_packet_pid_match_rejects_reused_pid_and_other_executable(self):
+        support = COMMON + r'''
+typedef const char *LPCWSTR;
+typedef uint64_t ULONGLONG;
+static int _wcsicmp(const char *a, const char *b) { return strcmp(a,b); }
+'''
+        run_c(support, [('src/packet_process.c', 'process_matches_packet')], r'''
+int main(void) {
+ const char *path = "C:\\Windows\\System32\\svchost.exe";
+ assert(process_matches_packet(path, path, 100, 120));
+ assert(!process_matches_packet(path, path, 121, 120));
+ assert(!process_matches_packet(path, path, 0, 120));
+ assert(!process_matches_packet("C:\\elsewhere\\svchost.exe", path, 100, 120));
+}
+''')
+
+    def test_filter_attribution_requires_one_equality_descriptor(self):
+        support = COMMON + r'''
+typedef uint32_t UINT32;
+typedef struct { UINT32 size; unsigned char *data; } FWP_BYTE_BLOB;
+typedef struct {
+ int fieldKey, matchType;
+ struct { int type; FWP_BYTE_BLOB *sd; } conditionValue;
+} FWPM_FILTER_CONDITION0;
+typedef struct { UINT32 numFilterConditions; FWPM_FILTER_CONDITION0 *filterCondition; } FWPM_FILTER0;
+static int FWPM_CONDITION_ALE_USER_ID = 1;
+enum { FWP_MATCH_EQUAL = 1, FWP_SECURITY_DESCRIPTOR_TYPE = 2 };
+static int IsEqualGUID(const int *a, const int *b) { return *a == *b; }
+'''
+        run_c(support, [('src/log.c', '_wfp_log_get_service_descriptor')], r'''
+int main(void) {
+ unsigned char blob[1] = {0};
+ FWP_BYTE_BLOB descriptor = {sizeof(blob), blob};
+ const FWP_BYTE_BLOB *selected = NULL;
+ FWPM_FILTER_CONDITION0 conditions[] = {
+  {0, FWP_MATCH_EQUAL, {FWP_SECURITY_DESCRIPTOR_TYPE, &descriptor}},
+  {1, FWP_MATCH_EQUAL, {FWP_SECURITY_DESCRIPTOR_TYPE, &descriptor}},
+  {1, FWP_MATCH_EQUAL, {FWP_SECURITY_DESCRIPTOR_TYPE, &descriptor}}
+ };
+ FWPM_FILTER0 filter = {0, conditions};
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+ filter.numFilterConditions = 1;
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+ filter.numFilterConditions = 2;
+ assert(_wfp_log_get_service_descriptor(&filter, &selected) && selected == &descriptor);
+ filter.numFilterConditions = 3;
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+ filter.numFilterConditions = 2;
+ conditions[1].matchType = 0;
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+ conditions[1].matchType = FWP_MATCH_EQUAL;
+ conditions[1].conditionValue.type = 0;
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+ conditions[1].conditionValue.type = FWP_SECURITY_DESCRIPTOR_TYPE;
+ descriptor.size = 0;
+ assert(!_wfp_log_get_service_descriptor(&filter, &selected));
+}
+''')
+
+    def test_new_app_allow_window_excludes_known_apps_and_earlier_events(self):
+        support = COMMON + r'''
+typedef struct { uint64_t ticks; } FILETIME;
+typedef struct { BOOLEAN is_allow, is_myprovider; FILETIME event_time; } LOG, *PITEM_LOG;
+static struct { unsigned command; LONG duration; uint64_t deadline; FILETIME started; } new_app_policy;
+static uint64_t clock_tick;
+static uint64_t GetTickCount64(void) { return clock_tick; }
+static int CompareFileTime(const FILETIME *a, const FILETIME *b) { return (a->ticks>b->ticks)-(a->ticks<b->ticks); }
+'''
+        run_c(support, [('src/log.c', '_app_log_newapp_duration')], r'''
+int main(void) {
+ LOG log = {FALSE, TRUE, {100}};
+ new_app_policy.command = 341;
+ new_app_policy.duration = 60;
+ new_app_policy.deadline = 70000;
+ new_app_policy.started.ticks = 100;
+ clock_tick = 10000;
+ assert(_app_log_newapp_duration(&log, TRUE) == 60);
+ assert(_app_log_newapp_duration(&log, FALSE) == 0);
+ log.event_time.ticks--;
+ assert(_app_log_newapp_duration(&log, TRUE) == 0);
+ log.event_time.ticks++;
+ new_app_policy.duration = -1;
+ assert(_app_log_newapp_duration(&log, TRUE) == -1);
+ log.is_myprovider = FALSE;
+ assert(_app_log_newapp_duration(&log, TRUE) == 0);
+ log.is_myprovider = TRUE;
+ log.is_allow = TRUE;
+ assert(_app_log_newapp_duration(&log, TRUE) == 0);
+ log.is_allow = FALSE;
+ clock_tick = 70000;
+ assert(_app_log_newapp_duration(&log, TRUE) == 0);
+ clock_tick = 10000;
+ new_app_policy.command = 0;
+ assert(_app_log_newapp_duration(&log, TRUE) == 0);
+ return 0;
+}
+''')
+
+    def test_packet_capture_accepts_watched_allowed_apps_only_when_globally_excluded(self):
+        support = COMMON + r'''
+#include <wchar.h>
+typedef const wchar_t *LPCWSTR;
+typedef struct { LPCWSTR buffer; } STRING;
+typedef struct { BOOLEAN is_myprovider, is_allow, is_system; size_t capture_bytes; STRING *path; } LOG, *PITEM_LOG;
+typedef struct { PITEM_LOG log; size_t bytes; } PH_NODE;
+static BOOLEAN ph_initialized = TRUE, log_enabled = TRUE, exclude_allow = TRUE;
+static unsigned accepted;
+static BOOLEAN _r_config_getboolean(LPCWSTR key, BOOLEAN fallback, void *section) {
+ (void)section;
+ if (!wcscmp(key, L"IsLogUiEnabled")) return log_enabled;
+ if (!wcscmp(key, L"IsExcludeClassifyAllow")) return exclude_allow;
+ return fallback;
+}
+static BOOLEAN _app_packet_iswatched(LPCWSTR path) { return path && !wcscmp(path, L"C:\\Apps\\watched.exe"); }
+#define _r_obj_reference(log) (log)
+static void _app_packet_lost(void) { assert(0); }
+static void enqueue(PH_NODE *node) { ++accepted; free(node); }
+'''
+        run_c(support, [('src/packet_history.c', '_app_packet_submit')], r'''
+int main(void) {
+ STRING watched = { L"C:\\Apps\\watched.exe" }, other = { L"C:\\Apps\\other.exe" };
+ LOG log = {TRUE, TRUE, FALSE, 0, &watched};
+ _app_packet_submit(&log);
+ assert(accepted == 1);
+ log.path = &other;
+ _app_packet_submit(&log);
+ assert(accepted == 1);
+ exclude_allow = FALSE;
+ _app_packet_submit(&log);
+ assert(accepted == 2);
+ log_enabled = FALSE;
+ log.path = &watched;
+ _app_packet_submit(&log);
+ assert(accepted == 2);
+ return 0;
+}
+''')
+
+    def test_rule_tabs_insert_rows_into_existing_groups(self):
+        support = COMMON + r'''
+typedef int INT, ENUM_TYPE_DATA;
+typedef intptr_t LONG_PTR;
+typedef void *HWND;
+typedef struct { unsigned count; } APP_SET;
+typedef struct {
+ ENUM_TYPE_DATA type;
+ BOOLEAN is_enabled, is_fordriver, is_forservice;
+ APP_SET *apps;
+} RULE, *PITEM_RULE;
+typedef void *PITEM_LISTVIEW_CONTEXT;
+enum { DATA_APP_REGULAR, DATA_APP_DEVICE, DATA_APP_NETWORK, DATA_APP_PICO,
+       DATA_APP_SERVICE, DATA_APP_UWP, DATA_RULE_BLOCKLIST, DATA_RULE_SYSTEM,
+       DATA_RULE_SYSTEM_USER, DATA_RULE_USER };
+enum { IDC_APPS_PROFILE=106, IDC_APPS_SERVICE, IDC_APPS_UWP, IDC_RULES_BLOCKLIST,
+       IDC_RULES_SYSTEM, IDC_RULES_CUSTOM };
+#define LPSTR_TEXTCALLBACK NULL
+#define I_IMAGECALLBACK -1
+#define I_GROUPIDCALLBACK -1
+#define INT_ERROR -1
+#define LV_HIDDEN_GROUP_ID 999
+#define _r_obj_isempty(set) (!(set) || (set)->count == 0)
+#define _app_listview_lock(w,id) ((void)(w), (void)(id))
+#define _app_listview_unlock(w,id) _app_listview_lock(w,id)
+static int visible_group[3], last_index = -1;
+static LONG_PTR _app_listview_createcontext(ULONG_PTR idx) { return (LONG_PTR)idx + 1; }
+static void _app_listview_destroycontext(PITEM_LISTVIEW_CONTEXT context) { (void)context; }
+static int _r_listview_getitemcount(HWND w, INT id) { (void)w; (void)id; return 0; }
+static int _r_listview_additem(HWND w, INT id, INT at, void *text, INT image, INT group, LONG_PTR data) {
+ (void)w; (void)text; (void)image;
+ assert(at == 0 && data != 0);
+ if (group < 0 || group > 2) return INT_ERROR;
+ visible_group[id - IDC_RULES_BLOCKLIST] = group;
+ return 0;
+}
+static void _app_setruleiteminfo(HWND w, INT id, INT at, PITEM_RULE rule, BOOLEAN for_app) {
+ (void)w; (void)id; (void)rule; (void)for_app;
+ last_index = at;
+}
+'''
+        functions = [
+            ('src/listview.c', '_app_listview_getbytype'),
+            ('src/listview.c', '_app_listview_getrulegroup'),
+            ('src/listview.c', '_app_listview_addruleitem'),
+        ]
+        run_c(support, functions, r'''
+int main(void) {
+ RULE blocked = { DATA_RULE_BLOCKLIST, FALSE, FALSE, FALSE, NULL };
+ RULE system = { DATA_RULE_SYSTEM, TRUE, FALSE, TRUE, NULL };
+ RULE custom = { DATA_RULE_USER, TRUE, FALSE, FALSE, NULL };
+ _app_listview_addruleitem(NULL, &blocked, 0, FALSE);
+ _app_listview_addruleitem(NULL, &system, 1, FALSE);
+ _app_listview_addruleitem(NULL, &custom, 2, FALSE);
+ assert(visible_group[0] == 2 && visible_group[1] == 1 && visible_group[2] == 0);
+ assert(_app_listview_getrulegroup(&custom, TRUE) == LV_HIDDEN_GROUP_ID);
+ assert(last_index == 0);
+ return 0;
+}
+''')
+
     def test_rule_membership_reuses_index_and_invalidates(self):
         support = COMMON + r'''
 #define DATA_RULE_USER 1

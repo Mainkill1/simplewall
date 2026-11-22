@@ -126,6 +126,20 @@ VOID _app_listview_addappitem (
 	_app_listview_unlock (hwnd, listview_id);
 }
 
+INT _app_listview_getrulegroup (
+	_In_ PITEM_RULE ptr_rule,
+	_In_ BOOLEAN is_hidden
+)
+{
+	if (is_hidden)
+		return LV_HIDDEN_GROUP_ID;
+
+	if (!ptr_rule->is_enabled)
+		return 2;
+
+	return (ptr_rule->is_fordriver || ptr_rule->is_forservice || !_r_obj_isempty (ptr_rule->apps)) ? 1 : 0;
+}
+
 VOID _app_listview_addruleitem (
 	_In_ HWND hwnd,
 	_In_ PITEM_RULE ptr_rule,
@@ -133,6 +147,7 @@ VOID _app_listview_addruleitem (
 	_In_ BOOLEAN is_forapp
 )
 {
+	LONG_PTR context;
 	INT item_id, listview_id;
 
 	listview_id = _app_listview_getbytype (ptr_rule->type);
@@ -144,8 +159,13 @@ VOID _app_listview_addruleitem (
 
 	_app_listview_lock (hwnd, listview_id);
 
-	_r_listview_additem (hwnd, listview_id, item_id, LPSTR_TEXTCALLBACK, I_IMAGECALLBACK, I_GROUPIDCALLBACK, _app_listview_createcontext (rule_idx));
-	_app_setruleiteminfo (hwnd, listview_id, item_id, ptr_rule, is_forapp);
+	context = _app_listview_createcontext (rule_idx);
+	item_id = _r_listview_additem (hwnd, listview_id, item_id, LPSTR_TEXTCALLBACK, I_IMAGECALLBACK, _app_listview_getrulegroup (ptr_rule, FALSE), context);
+
+	if (item_id != INT_ERROR)
+		_app_setruleiteminfo (hwnd, listview_id, item_id, ptr_rule, is_forapp);
+	else
+		_app_listview_destroycontext ((PITEM_LISTVIEW_CONTEXT)context);
 
 	_app_listview_unlock (hwnd, listview_id);
 }
