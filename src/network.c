@@ -762,6 +762,15 @@ BOOLEAN _app_network_getpath (
 
 	if (process_name)
 	{
+		if (ptr_network->type == DATA_APP_REGULAR)
+		{
+			PR_STRING network_path = _app_getnetworkapppath (process_name->buffer);
+			if (network_path)
+			{
+				_r_obj_movereference ((PVOID_PTR)&process_name, network_path);
+				ptr_network->type = DATA_APP_NETWORK;
+			}
+		}
 		ptr_network->app_hash = _r_str_gethash (&process_name->sr, TRUE);
 		ptr_network->path = process_name;
 

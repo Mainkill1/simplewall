@@ -8,14 +8,84 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <arpa/inet.h>
 #endif
+typedef struct
+{
+	int64_t version, app;
+	int allow, direction, valid;
+	int64_t total, inbound, outbound, destinations, oldest, newest;
+} PH_STATS;
+
 struct PH_STORE
 {
 	sqlite3 *db;
 	sqlite3_stmt *app, *insert;
 	int readonly;
+	PH_SORT_KEYS sort_keys;
+	PH_STATS stats;
 };
+
+static void sort_app_name(sqlite3_context *context, int argc, sqlite3_value **args)
+{
+	(void)argc;
+	const char *path = (const char *)sqlite3_value_text(args[0]);
+	PH_STORE *s = sqlite3_user_data(context);
+	char label[PH_TEXT] = {0};
+	if (path && s->sort_keys.app_name)
+		s->sort_keys.app_name(path, label, sizeof(label));
+	if (label[0])
+	{
+		sqlite3_result_text(context, label, -1, SQLITE_TRANSIENT);
+		return;
+	}
+	if (path)
+	{
+		const char *name = strrchr(path, '\\');
+		if (!name)
+			name = strrchr(path, '/');
+		sqlite3_result_text(context, name ? name + 1 : path, -1, SQLITE_TRANSIENT);
+	}
+}
+
+static void sort_host(sqlite3_context *context, int argc, sqlite3_value **args)
+{
+	(void)argc;
+	PH_STORE *s = sqlite3_user_data(context);
+	const char *address = (const char *)sqlite3_value_text(args[0]);
+	char hostname[1024] = {0};
+	if (address && s->sort_keys.hostname)
+		s->sort_keys.hostname(s->sort_keys.context, address, sqlite3_value_int(args[1]), hostname, sizeof(hostname));
+	if (hostname[0])
+		sqlite3_result_text(context, hostname, -1, SQLITE_TRANSIENT);
+}
+
+static void sort_address(sqlite3_context *context, int argc, sqlite3_value **args)
+{
+	(void)argc;
+	const char *address = (const char *)sqlite3_value_text(args[0]);
+	unsigned char key[17];
+	if (address && inet_pton(AF_INET, address, key + 1) == 1)
+	{
+		key[0] = 0;
+		sqlite3_result_blob(context, key, 5, SQLITE_TRANSIENT);
+	}
+	else if (address && inet_pton(AF_INET6, address, key + 1) == 1)
+	{
+		key[0] = 1;
+		sqlite3_result_blob(context, key, 17, SQLITE_TRANSIENT);
+	}
+}
+
+void ph_set_sort_keys(PH_STORE *s, const PH_SORT_KEYS *keys)
+{
+	s->sort_keys = *keys;
+}
 static int sql(PH_STORE *s, const char *text)
 {
 	return sqlite3_exec(s->db, text, NULL, NULL, NULL);
@@ -132,15 +202,24 @@ int ph_open(PH_STORE **out, const char *path, int ro)
 	s->readonly = ro;
 	sqlite3_busy_timeout(s->db, 250);
 	sqlite3_limit(s->db, SQLITE_LIMIT_LENGTH, 1024 * 1024);
+	const int flags = SQLITE_UTF8 | SQLITE_DIRECTONLY;
+	rc = sqlite3_create_function(s->db, "ph_sort_app", 1, flags, s, sort_app_name, NULL, NULL);
+	if (!rc)
+		rc = sqlite3_create_function(s->db, "ph_sort_host", 2, flags, s, sort_host, NULL, NULL);
+	if (!rc)
+		rc = sqlite3_create_function(s->db, "ph_sort_address", 1, flags | SQLITE_DETERMINISTIC, NULL,
+									 sort_address, NULL, NULL);
+	if (rc)
+		goto fail;
 	rc = scalar(s, "PRAGMA user_version", &version);
 	if (rc)
 		goto fail;
-	if (version != 0 && version != 2)
+	if (version != 0 && version != 2 && version != 3 && version != 4)
 	{
 		rc = SQLITE_MISMATCH;
 		goto fail;
 	}
-	if (ro && version != 2)
+	if (ro && version != 4)
 	{
 		rc = SQLITE_MISMATCH;
 		goto fail;
@@ -164,6 +243,18 @@ int ph_open(PH_STORE **out, const char *path, int ro)
 					"journal_size_limit=1048576;");
 		if (rc)
 			goto fail;
+		if (version == 2 || version == 3)
+		{
+			rc = sql(s, "BEGIN IMMEDIATE;");
+			if (!rc && version == 2)
+				rc = sql(s, "ALTER TABLE events ADD COLUMN service TEXT NOT NULL DEFAULT '';");
+			if (!rc)
+				rc = sql(s, "ALTER TABLE events ADD COLUMN pid INTEGER NOT NULL DEFAULT 0;"
+							"ALTER TABLE events ADD COLUMN process_started INTEGER NOT NULL DEFAULT 0;"
+							"PRAGMA user_version=4; COMMIT;");
+			if (rc)
+				goto fail;
+		}
 		rc = sql(
 			s,
 			"BEGIN;"
@@ -172,7 +263,8 @@ int ph_open(PH_STORE **out, const char *path, int ro)
 			"CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,app INTEGER NOT NULL,t "
 			"INTEGER NOT NULL,allow INTEGER NOT NULL,dir INTEGER NOT NULL,proto INTEGER NOT NULL,af INTEGER "
 			"NOT NULL,remote TEXT NOT NULL,rport INTEGER NOT NULL,local TEXT NOT NULL,lport INTEGER NOT "
-			"NULL,rule TEXT NOT NULL,filter INTEGER NOT NULL,user TEXT NOT NULL,layer TEXT NOT NULL);"
+			"NULL,rule TEXT NOT NULL,filter INTEGER NOT NULL,user TEXT NOT NULL,layer TEXT NOT NULL,"
+			"service TEXT NOT NULL DEFAULT '',pid INTEGER NOT NULL DEFAULT 0,process_started INTEGER NOT NULL DEFAULT 0);"
 			"CREATE INDEX IF NOT EXISTS event_app_time ON events(app,t DESC,id DESC);"
 			"CREATE INDEX IF NOT EXISTS event_view_time ON events(allow,t DESC,id DESC);"
 			"CREATE INDEX IF NOT EXISTS event_app_view ON events(app,allow,t DESC,id DESC);"
@@ -195,7 +287,7 @@ int ph_open(PH_STORE **out, const char *path, int ro)
 			"CREATE TRIGGER IF NOT EXISTS event_remove AFTER DELETE ON events BEGIN UPDATE summary SET n=n-1 "
 			"WHERE app=old.app AND allow=old.allow; DELETE FROM summary WHERE app=old.app AND "
 			"allow=old.allow AND n=0; END;"
-			"PRAGMA user_version=2; COMMIT;");
+			"PRAGMA user_version=4; COMMIT;");
 		if (rc)
 			goto fail;
 		rc = prep(s, &s->app,
@@ -205,8 +297,8 @@ int ph_open(PH_STORE **out, const char *path, int ro)
 			goto fail;
 		rc = prep(
 			s, &s->insert,
-			"INSERT INTO events(app,t,allow,dir,proto,af,remote,rport,local,lport,rule,filter,user,layer) "
-			"VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+			"INSERT INTO events(app,t,allow,dir,proto,af,remote,rport,local,lport,rule,filter,user,layer,service) "
+			"VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 		if (rc)
 			goto fail;
 	}
@@ -293,19 +385,47 @@ int ph_append(PH_STORE *s, const PH_EVENT *e)
 	sqlite3_bind_int64(p, 12, e->filter);
 	text(p, 13, e->user);
 	text(p, 14, e->layer);
+	text(p, 15, e->service);
 	rc = sqlite3_step(p);
 	sqlite3_reset(p);
 	return rc == SQLITE_DONE ? 0 : rc;
 }
-int ph_apps(PH_STORE *s, int allow, const char *filter, int64_t offset, PH_APPS *out)
+
+int64_t ph_inserted_id(PH_STORE *s)
+{
+	return sqlite3_last_insert_rowid(s->db);
+}
+
+int ph_set_packet_process(PH_STORE *s, int64_t id, uint32_t pid, int64_t started, const char *service)
 {
 	sqlite3_stmt *p = NULL;
-	int rc;
+	int rc = prep(s, &p, "UPDATE events SET pid=?1,process_started=?2,"
+		"service=CASE WHEN service='' THEN ?3 ELSE service END WHERE id=?4 AND pid=0");
+	if (!rc)
+	{
+		sqlite3_bind_int64(p, 1, pid);
+		sqlite3_bind_int64(p, 2, started);
+		text(p, 3, service);
+		sqlite3_bind_int64(p, 4, id);
+		rc = sqlite3_step(p);
+	}
+	sqlite3_finalize(p);
+	return rc == SQLITE_DONE ? 0 : rc;
+}
+
+int ph_apps(PH_STORE *s, int allow, const char *filter, int64_t offset, PH_ORDER order, PH_APPS *out)
+{
+	sqlite3_stmt *p = NULL;
+	char query[512];
+	const char *key = order.column == PH_SORT_APP ? "ph_sort_app(a.path) COLLATE NOCASE"
+		: order.column == PH_SORT_COUNT ? "v.n" : "v.last";
+	const char *ties = order.column == PH_SORT_APP || order.column == PH_SORT_COUNT ? "v.last DESC," : "";
 	memset(out, 0, sizeof(*out));
-	rc = prep(s, &p,
-			  "SELECT a.id,a.path,v.n,v.last,v.seq,count(*) OVER() FROM apps a JOIN summary v ON v.app=a.id "
-			  "WHERE v.allow=? AND v.n>0 AND instr(lower(a.path),lower(?))>0 ORDER BY v.last DESC,v.seq "
-			  "DESC,a.id LIMIT 501 OFFSET ?");
+	snprintf(query, sizeof(query),
+			 "SELECT a.id,a.path,v.n,v.last,v.seq,count(*) OVER() FROM apps a JOIN summary v ON v.app=a.id "
+			 "WHERE v.allow=? AND v.n>0 AND instr(lower(a.path),lower(?))>0 ORDER BY %s %s,%sv.seq DESC,a.id "
+			 "LIMIT 501 OFFSET ?", key, order.ascending ? "ASC" : "DESC", ties);
+	int rc = prep(s, &p, query);
 	if (rc)
 		return rc;
 	sqlite3_bind_int(p, 1, allow);
@@ -337,48 +457,102 @@ static void querybind(sqlite3_stmt *p, const PH_QUERY *q)
 	sqlite3_bind_int(p, 3, q->direction);
 	sqlite3_bind_int64(p, 4, q->offset);
 }
+static const char *packet_order_key(const PH_QUERY *q)
+{
+	switch (q->order.column)
+	{
+	case PH_SORT_APP: return "n.name COLLATE NOCASE";
+	case PH_SORT_COUNT: return q->grouped ? "count(*)" : "e.id";
+	case PH_SORT_REMOTE: return "ph_sort_address(e.remote)";
+	case PH_SORT_HOST: return "ph_sort_host(e.remote,e.af) COLLATE NOCASE";
+	case PH_SORT_PORT: return "e.rport";
+	case PH_SORT_PROTOCOL: return "CASE e.proto WHEN 1 THEN 0 WHEN 6 THEN 2 WHEN 17 THEN 3 ELSE 1 END";
+	case PH_SORT_DIRECTION: return "e.dir";
+	case PH_SORT_RULE: return "e.rule COLLATE NOCASE";
+	case PH_SORT_SERVICE: return "nullif(e.service,'') COLLATE NOCASE";
+	default: return q->grouped ? "max(e.t)" : "e.t";
+	}
+}
+
+static int query_stats(PH_STORE *s, const PH_QUERY *q, const char *where, PH_PAGE *out)
+{
+	PH_STATS *stats = &s->stats;
+	int64_t version = 0;
+	if (s->readonly)
+	{
+		// Reading the version also establishes the snapshot used by the page query.
+		int rc = scalar(s, "PRAGMA data_version", &version);
+		if (rc)
+			return rc;
+	}
+	if (!s->readonly || !stats->valid || stats->version != version ||
+		stats->app != q->app || stats->allow != q->allow || stats->direction != q->direction)
+	{
+		sqlite3_stmt *p = NULL;
+		char query[512];
+		snprintf(query, sizeof(query),
+				 "SELECT count(*),coalesce(sum(dir=0),0),coalesce(sum(dir=1),0),count(DISTINCT "
+				 "remote||':'||rport||':'||proto),coalesce(min(t),0),coalesce(max(t),0) FROM events e%s",
+				 where);
+		int rc = prep(s, &p, query);
+		if (!rc)
+		{
+			querybind(p, q);
+			rc = sqlite3_step(p);
+			if (rc == SQLITE_ROW)
+			{
+				*stats = (PH_STATS){version, q->app, q->allow, q->direction, 1,
+					num(p, 0), num(p, 1), num(p, 2), num(p, 3), num(p, 4), num(p, 5)};
+				rc = 0;
+			}
+		}
+		sqlite3_finalize(p);
+		if (rc)
+			return rc;
+	}
+	out->total = stats->total;
+	out->inbound = stats->inbound;
+	out->outbound = stats->outbound;
+	out->destinations = stats->destinations;
+	out->oldest = stats->oldest;
+	out->newest = stats->newest;
+	return 0;
+}
+
 int ph_query(PH_STORE *s, const PH_QUERY *q, PH_PAGE *out)
 {
 	sqlite3_stmt *p = NULL;
 	int rc;
 	char query[2400];
-	const char *where =
-		q->app
-			? " FROM events e JOIN apps a ON a.id=e.app WHERE e.app=?1 AND e.allow=?2 AND (?3=-1 OR "
-			  "e.dir=?3) "
-			: " FROM events e JOIN apps a ON a.id=e.app WHERE ?1=0 AND e.allow=?2 AND (?3=-1 OR e.dir=?3) ";
+	const char *where = q->app ? " WHERE e.app=?1 AND e.allow=?2 AND (?3=-1 OR e.dir=?3) "
+							   : " WHERE ?1=0 AND e.allow=?2 AND (?3=-1 OR e.dir=?3) ";
 	memset(out, 0, sizeof(*out));
 	rc = sql(s, "BEGIN");
 	if (rc)
 		return rc;
-	snprintf(query, sizeof(query),
-			 "SELECT count(*),coalesce(sum(dir=0),0),coalesce(sum(dir=1),0),count(DISTINCT "
-			 "remote||':'||rport||':'||proto),coalesce(min(t),0),coalesce(max(t),0)%s",
-			 where);
-	rc = prep(s, &p, query);
+	rc = query_stats(s, q, where, out);
 	if (rc)
 		goto done;
-	querybind(p, q);
-	rc = sqlite3_step(p);
-	if (rc != SQLITE_ROW)
-		goto done;
-	out->total = num(p, 0);
-	out->inbound = num(p, 1);
-	out->outbound = num(p, 2);
-	out->destinations = num(p, 3);
-	out->oldest = num(p, 4);
-	out->newest = num(p, 5);
-	sqlite3_finalize(p);
-	p = NULL;
+	int by_name = q->order.column == PH_SORT_APP;
+	const char *ties = q->order.column == PH_SORT_LAST ? "" : "last DESC,";
+	const char *direction = q->order.ascending ? "ASC" : "DESC";
+	const char *id_direction = q->order.column == PH_SORT_LAST ? direction : "DESC";
+	// Keep display text out of the sort and fetch it only for the selected page.
 	snprintf(query, sizeof(query),
-			 "SELECT "
-			 "max(e.id),e.app,%s,a.path,e.remote,e.rport,e.local,%s,e.rule,e.filter,e.user,e.layer,e.dir,e."
-			 "proto,e.af%s%s ORDER BY %s DESC,max(e.id) DESC LIMIT 501 OFFSET ?4",
-			 q->grouped ? "count(*),min(e.t),max(e.t)" : "1,e.t,e.t", q->grouped ? "0" : "e.lport", where,
-			 q->grouped
-				 ? " GROUP BY e.app,e.af,e.remote,e.rport,e.local,e.proto,e.dir,e.rule,e.filter,e.allow"
-				 : " GROUP BY e.id",
-			 q->grouped ? "max(e.t)" : "e.t");
+			 "WITH %s"
+			 "page AS MATERIALIZED (SELECT %s AS id,e.id AS representative,%s,%s AS sort_key "
+			 "FROM events e%s%s%s ORDER BY sort_key %s NULLS LAST,%sid %s LIMIT 501 OFFSET ?4) "
+			 "SELECT p.id,e.app,p.n,p.first,p.last,a.path,e.remote,e.rport,e.local,e.lport,"
+			 "e.rule,e.filter,e.user,e.layer,e.dir,e.proto,e.af,e.service,e.t,e.pid,e.process_started "
+			 "FROM page p CROSS JOIN events e ON e.id=p.representative CROSS JOIN apps a ON a.id=e.app "
+			 "ORDER BY p.sort_key COLLATE NOCASE %s NULLS LAST,%sp.id %s",
+			 by_name ? "names AS MATERIALIZED (SELECT id,ph_sort_app(path) AS name FROM apps), " : "",
+			 q->grouped ? "max(e.id)" : "e.id",
+			 q->grouped ? "count(*) AS n,min(e.t) AS first,max(e.t) AS last" : "1 AS n,e.t AS first,e.t AS last",
+			 packet_order_key(q), by_name ? " JOIN names n ON n.id=e.app" : "", where,
+			 q->grouped ? " GROUP BY e.app,e.af,e.remote,e.rport,e.local,e.proto,e.dir,e.rule,e.filter,e.allow,"
+			              "e.service COLLATE NOCASE" : "",
+			 direction, ties, id_direction, direction, ties, id_direction);
 	rc = prep(s, &p, query);
 	if (rc)
 		goto done;
@@ -409,6 +583,10 @@ int ph_query(PH_STORE *s, const PH_QUERY *q, PH_PAGE *out)
 		r->direction = (int)num(p, 14);
 		r->protocol = (int)num(p, 15);
 		r->af = (int)num(p, 16);
+		copycol(p, 17, r->service, sizeof(r->service));
+		r->sample_time = num(p, 18);
+		r->pid = (uint32_t)num(p, 19);
+		r->process_started = num(p, 20);
 	}
 	if (rc == SQLITE_DONE || rc == SQLITE_ROW)
 		rc = 0;

@@ -21,6 +21,7 @@ static PH_STORE *ph_reader_store;
 static PH_REQUEST ph_request;
 static PH_RESULT *ph_result;
 static LONG ph_generation, ph_revision, ph_initialized, ph_stopping, ph_read_busy;
+static volatile LONG ph_audit_revision;
 static LONG64 ph_dropped, ph_reported;
 LONG64 _app_packet_pending_loss(VOID)
 {
@@ -28,6 +29,83 @@ LONG64 _app_packet_pending_loss(VOID)
 }
 static BOOLEAN ph_requested;
 static WCHAR ph_path[32768], ph_failure[256];
+static SRWLOCK watches_lock = SRWLOCK_INIT;
+static PR_STRING watched_apps;
+static const WCHAR watches_key[] = L"AllowedApps";
+static const WCHAR watches_section[] = L"packet_history";
+
+VOID _app_packet_reloadwatches(VOID)
+{
+	PR_STRING paths = _r_config_getstring(watches_key, NULL, watches_section);
+	AcquireSRWLockExclusive(&watches_lock);
+	_r_obj_movereference((PVOID_PTR)&watched_apps, paths);
+	ReleaseSRWLockExclusive(&watches_lock);
+}
+
+BOOLEAN _app_packet_haswatches(VOID)
+{
+	AcquireSRWLockShared(&watches_lock);
+	BOOLEAN any = !_r_obj_isstringempty(watched_apps);
+	ReleaseSRWLockShared(&watches_lock);
+	return any;
+}
+
+BOOLEAN _app_packet_iswatched(LPCWSTR path)
+{
+	if (!path || !*path)
+		return FALSE;
+	R_STRINGREF identity, remaining = {0}, entry;
+	_r_obj_initializestringref(&identity, path);
+	AcquireSRWLockShared(&watches_lock);
+	if (watched_apps)
+		remaining = watched_apps->sr;
+	BOOLEAN found = FALSE;
+	while (remaining.length)
+	{
+		_r_str_splitatchar(&remaining, L'|', &entry, &remaining);
+		if (_r_str_isequal(&entry, &identity, TRUE))
+		{
+			found = TRUE;
+			break;
+		}
+	}
+	ReleaseSRWLockShared(&watches_lock);
+	return found;
+}
+
+BOOLEAN _app_packet_setwatch(LPCWSTR path, BOOLEAN enabled)
+{
+	if (!path || !*path || wcspbrk(path, L"|\r\n"))
+		return FALSE;
+	R_STRINGREF identity, remaining = {0}, entry;
+	R_STRINGBUILDER paths;
+	_r_obj_initializestringref(&identity, path);
+	_r_obj_initializestringbuilder(&paths, 256);
+	if (enabled)
+		_r_obj_appendstringbuilder2(&paths, &identity);
+	AcquireSRWLockExclusive(&watches_lock);
+	if (watched_apps)
+		remaining = watched_apps->sr;
+	while (remaining.length)
+	{
+		_r_str_splitatchar(&remaining, L'|', &entry, &remaining);
+		if (!entry.length || _r_str_isequal(&entry, &identity, TRUE))
+			continue;
+		if (paths.string->length)
+			_r_obj_appendstringbuilder(&paths, L"|");
+		_r_obj_appendstringbuilder2(&paths, &entry);
+	}
+	// Keep the serialized value within the Windows INI reader's string limit.
+	BOOLEAN fits = paths.string->length / sizeof(WCHAR) < 32700;
+	if (fits)
+		_r_obj_movereference((PVOID_PTR)&watched_apps, _r_obj_reference(paths.string));
+	ReleaseSRWLockExclusive(&watches_lock);
+	if (fits)
+		_r_config_setstring(watches_key, paths.string->length ? paths.string->buffer : NULL, watches_section);
+	_r_obj_deletestringbuilder(&paths);
+	return fits;
+}
+
 typedef struct
 {
 	char address[64];
@@ -68,6 +146,8 @@ VOID _app_packet_hostname(const char *address, int af, WCHAR *out, int count)
 		unsigned j = (ph_dns_next + i) % 256;
 		if (ph_dns[j].state != 1)
 		{
+			if (ph_dns[j].host[0])
+				InterlockedIncrement(&ph_dns_changed);
 			memset(&ph_dns[j], 0, sizeof(ph_dns[j]));
 			strncpy_s(ph_dns[j].address, 64, address, _TRUNCATE);
 			ph_dns[j].af = af;
@@ -119,11 +199,14 @@ static DWORD WINAPI dns_thread(PVOID arg)
 				GetNameInfoW((SOCKADDR *)&sa, sizeof(sa), host, 256, NULL, 0, NI_NAMEREQD);
 		}
 		EnterCriticalSection(&ph_lock);
-		wcscpy_s(ph_dns[index].host, 256, host);
+		if (wcscmp(ph_dns[index].host, host) != 0)
+		{
+			wcscpy_s(ph_dns[index].host, 256, host);
+			InterlockedIncrement(&ph_dns_changed);
+		}
 		ph_dns[index].state = 2;
 		ph_dns[index].expires = GetTickCount64() + 300000;
 		LeaveCriticalSection(&ph_lock);
-		InterlockedIncrement(&ph_dns_changed);
 		SetEvent(ph_dns_event);
 	}
 	WSACleanup();
@@ -140,6 +223,80 @@ static char *utf8(LPCWSTR s)
 	if (b)
 		WideCharToMultiByte(CP_UTF8, 0, s, -1, b, n, NULL, NULL);
 	return b;
+}
+
+VOID _app_packet_displayname(LPCWSTR path, WCHAR *out, int count)
+{
+	PITEM_APP app = _app_getappitem(_r_str_gethash2(path, TRUE));
+	LPCWSTR name = wcsrchr(path, L'\\');
+	wcsncpy_s(out, count, app && !_r_obj_isstringempty(app->display_name) ? app->display_name->buffer
+		: name ? name + 1 : path, _TRUNCATE);
+	if (app)
+		_r_obj_dereference(app);
+}
+
+static void PH_CALL app_sort_name(const char *path, char *out, int size)
+{
+	WCHAR wide_path[PH_TEXT], label[PH_TEXT];
+	if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wide_path, RTL_NUMBER_OF(wide_path)))
+	{
+		_app_packet_displayname(wide_path, label, RTL_NUMBER_OF(label));
+		if (!WideCharToMultiByte(CP_UTF8, 0, label, -1, out, size, NULL, NULL))
+			out[0] = 0;
+	}
+}
+
+typedef struct
+{
+	int family;
+	char address[64], name[1024];
+} PH_HOST_KEY;
+
+typedef struct
+{
+	size_t count;
+	PH_HOST_KEY entries[RTL_NUMBER_OF(ph_dns)];
+} PH_HOST_KEYS;
+
+static int PH_CALL compare_host_key(const void *left, const void *right)
+{
+	const PH_HOST_KEY *a = left, *b = right;
+	int address = strcmp(a->address, b->address);
+	return address ? address : (a->family > b->family) - (a->family < b->family);
+}
+
+static void snapshot_host_keys(PH_HOST_KEYS *keys)
+{
+	keys->count = 0;
+	if (!_r_config_getboolean(L"IsNetworkResolutionsEnabled", TRUE, NULL))
+		return;
+	EnterCriticalSection(&ph_lock);
+	for (size_t i = 0; i < RTL_NUMBER_OF(ph_dns); i++)
+	{
+		const PH_DNS *entry = &ph_dns[i];
+		if (!entry->state || !entry->host[0])
+			continue;
+		PH_HOST_KEY *key = &keys->entries[keys->count];
+		key->family = entry->af;
+		strcpy_s(key->address, sizeof(key->address), entry->address);
+		if (WideCharToMultiByte(CP_UTF8, 0, entry->host, -1, key->name, sizeof(key->name), NULL, NULL))
+			keys->count++;
+	}
+	LeaveCriticalSection(&ph_lock);
+	qsort(keys->entries, keys->count, sizeof(keys->entries[0]), compare_host_key);
+}
+
+static void PH_CALL host_sort_name(void *context, const char *address, int family, char *out, int size)
+{
+	PH_HOST_KEYS *keys = context;
+	if (!keys->count || strlen(address) >= sizeof(keys->entries[0].address))
+		return;
+	PH_HOST_KEY key;
+	key.family = family;
+	strcpy_s(key.address, sizeof(key.address), address);
+	const PH_HOST_KEY *found = bsearch(&key, keys->entries, keys->count, sizeof(key), compare_host_key);
+	if (found)
+		strcpy_s(out, size, found->name);
 }
 static void error_text(LPCWSTR s)
 {
@@ -211,7 +368,8 @@ VOID _app_packet_submit(PITEM_LOG log)
 	PH_NODE *n;
 	if (!ph_initialized || !log->is_myprovider || !_r_config_getboolean(L"IsLogUiEnabled", FALSE, NULL))
 		return;
-	if ((log->is_allow && _r_config_getboolean(L"IsExcludeClassifyAllow", TRUE, NULL)) ||
+	if ((log->is_allow && _r_config_getboolean(L"IsExcludeClassifyAllow", TRUE, NULL) &&
+		 !_app_packet_iswatched(log->path ? log->path->buffer : NULL)) ||
 		(log->is_system && _r_config_getboolean(L"IsExcludeStealth", TRUE, NULL)))
 		return;
 	n = calloc(1, sizeof(*n));
@@ -240,12 +398,17 @@ VOID _app_packet_command(int type, int64_t app, int64_t cap, int days, int mib)
 	n->mib = mib;
 	enqueue(n);
 }
-static int store_log(PH_STORE *s, PITEM_LOG log)
+BOOLEAN _app_packet_issvchost(LPCWSTR path)
+{
+	return path && config.svchost_path && _wcsicmp(path, config.svchost_path->buffer) == 0;
+}
+
+static int store_log(PH_STORE *s, PITEM_LOG log, PH_ROW *audit)
 {
 	PH_EVENT e = {0};
 	PR_STRING remote = NULL, local = NULL;
 	WCHAR *key = NULL;
-	char *values[7] = {0};
+	char *values[8] = {0};
 	int rc = 7;
 	SIZE_T len;
 	int i;
@@ -267,7 +430,8 @@ static int store_log(PH_STORE *s, PITEM_LOG log)
 	values[4] = utf8(_r_obj_getstring(local));
 	values[5] = utf8(_r_obj_getstring(log->username));
 	values[6] = utf8(_r_obj_getstring(log->layer_name));
-	for (i = 0; i < 7; i++)
+	values[7] = utf8(_r_obj_getstring(log->service));
+	for (i = 0; i < RTL_NUMBER_OF(values); i++)
 		if (!values[i])
 			goto done;
 	e.identity = values[0];
@@ -277,6 +441,7 @@ static int store_log(PH_STORE *s, PITEM_LOG log)
 	e.local = values[4];
 	e.user = values[5];
 	e.layer = values[6];
+	e.service = values[7];
 	e.timestamp = log->timestamp;
 	e.filter = log->filter_id;
 	e.allow = log->is_allow;
@@ -286,8 +451,23 @@ static int store_log(PH_STORE *s, PITEM_LOG log)
 	e.remote_port = log->remote_port;
 	e.local_port = log->local_port;
 	rc = ph_append(s, &e);
+	if (!rc && audit && !e.allow && e.filter && e.local_port && e.remote_port &&
+		(e.protocol == IPPROTO_TCP || e.protocol == IPPROTO_UDP) && _app_packet_issvchost(path))
+	{
+		memset(audit, 0, sizeof(*audit));
+		audit->id = ph_inserted_id(s);
+		audit->sample_time = e.timestamp;
+		audit->filter = e.filter;
+		audit->direction = e.direction;
+		audit->protocol = e.protocol;
+		audit->af = e.af;
+		audit->local_port = e.local_port;
+		audit->remote_port = e.remote_port;
+		snprintf(audit->local, sizeof(audit->local), "%s", e.local);
+		snprintf(audit->remote, sizeof(audit->remote), "%s", e.remote);
+	}
 done:
-	for (i = 0; i < 7; i++)
+	for (i = 0; i < RTL_NUMBER_OF(values); i++)
 		free(values[i]);
 	free(key);
 	if (remote)
@@ -296,9 +476,54 @@ done:
 		_r_obj_dereference(local);
 	return rc;
 }
+
+static size_t resolve_pending_audit(PH_STORE *s, PH_ROW *rows, ULONGLONG *deadlines, size_t count, ULONGLONG now)
+{
+	_app_packet_resolve_audit(rows, count);
+	if (!_app_packet_audit_enabled())
+		return 0;
+
+	int rc = 0;
+	BOOL writing = FALSE;
+	for (size_t i = 0; i < count && !rc; i++)
+	{
+		if (!rows[i].pid)
+			continue;
+		if (!writing)
+		{
+			rc = ph_begin_cleanup(s);
+			writing = !rc;
+		}
+		if (!rc)
+			rc = ph_set_packet_process(s, rows[i].id, rows[i].pid, rows[i].process_started, rows[i].service);
+	}
+	if (writing)
+	{
+		if (!rc)
+			rc = ph_commit(s);
+		if (rc)
+			ph_rollback(s);
+		else
+			InterlockedIncrement(&ph_audit_revision);
+	}
+
+	size_t remaining = 0;
+	for (size_t i = 0; i < count; i++)
+	{
+		if ((rows[i].pid && !rc) || now >= deadlines[i])
+			continue;
+		rows[remaining] = rows[i];
+		deadlines[remaining++] = deadlines[i];
+	}
+	return remaining;
+}
+
 static DWORD WINAPI writer_thread(PVOID arg)
 {
 	PH_STORE *s = NULL;
+	PH_ROW *pending_audit = NULL;
+	ULONGLONG deadlines[PH_AUDIT_BATCH], next_audit = 0;
+	size_t pending_count = 0;
 	char *path = utf8(ph_path);
 	int rc = path ? ph_open(&s, path, 0) : 7;
 	LONG64 reported = 0;
@@ -325,6 +550,12 @@ static DWORD WINAPI writer_thread(PVOID arg)
 		int count = 0, records = 0;
 		LONG64 lost;
 		WaitForSingleObject(ph_write_event, 250);
+		BOOL audit = !ph_stopping && _app_packet_audit_enabled();
+		ULONGLONG now = GetTickCount64();
+		if (!audit)
+			pending_count = 0;
+		else if (!pending_audit)
+			pending_audit = calloc(PH_AUDIT_BATCH, sizeof(*pending_audit));
 		EnterCriticalSection(&ph_lock);
 		while (ph_head && count++ < 256)
 		{
@@ -346,6 +577,7 @@ static DWORD WINAPI writer_thread(PVOID arg)
 		LeaveCriticalSection(&ph_lock);
 		if (batch)
 		{
+			size_t before = pending_count;
 			rc = s ? (batch->command ? ph_begin_cleanup(s) : ph_begin(s)) : 1;
 			for (n = batch; n; n = n->next)
 			{
@@ -353,7 +585,15 @@ static DWORD WINAPI writer_thread(PVOID arg)
 				{
 					records++;
 					if (!rc)
-						rc = store_log(s, n->log);
+					{
+						PH_ROW *candidate = audit && pending_audit && pending_count < PH_AUDIT_BATCH
+							? &pending_audit[pending_count] : NULL;
+						if (candidate)
+							candidate->id = 0;
+						rc = store_log(s, n->log, candidate);
+						if (!rc && candidate && candidate->id)
+							deadlines[pending_count++] = now + 3000;
+					}
 				}
 				else if (!rc)
 				{
@@ -369,6 +609,7 @@ static DWORD WINAPI writer_thread(PVOID arg)
 				ph_rollback(s);
 			if (rc)
 			{
+				pending_count = before;
 				if (s)
 					ph_rollback(s);
 				InterlockedAdd64(&ph_dropped, records);
@@ -387,6 +628,11 @@ static DWORD WINAPI writer_thread(PVOID arg)
 				n = next;
 			}
 			InterlockedIncrement(&ph_revision);
+		}
+		if (pending_count && now >= next_audit && !ph_stopping)
+		{
+			next_audit = now + 500;
+			pending_count = resolve_pending_audit(s, pending_audit, deadlines, pending_count, now);
 		}
 		lost = InterlockedCompareExchange64(&ph_dropped, 0, 0);
 		if (s && lost > reported)
@@ -414,14 +660,17 @@ static DWORD WINAPI writer_thread(PVOID arg)
 		if (stop)
 			break;
 	}
+	free(pending_audit);
 	ph_close(s);
 	return 0;
 }
 static DWORD WINAPI reader_thread(PVOID arg)
 {
+	HWND hwnd = (HWND)arg;
 	PH_STORE *s = NULL;
+	PH_HOST_KEYS host_keys;
+	const PH_SORT_KEYS keys = {&host_keys, app_sort_name, host_sort_name};
 	char *path;
-	(void)arg;
 	WaitForSingleObject(ph_ready_event, INFINITE);
 	path = utf8(ph_path);
 	if (path)
@@ -429,6 +678,8 @@ static DWORD WINAPI reader_thread(PVOID arg)
 		ph_open(&s, path, 1);
 		free(path);
 	}
+	if (s)
+		ph_set_sort_keys(s, &keys);
 	EnterCriticalSection(&ph_lock);
 	ph_reader_store = s;
 	LeaveCriticalSection(&ph_lock);
@@ -463,9 +714,13 @@ static DWORD WINAPI reader_thread(PVOID arg)
 			r->error = 1;
 		else
 		{
-			r->error = ph_apps(s, request.query.allow, filter ? filter : "", request.app_offset, &r->apps);
+			r->error = ph_apps(s, request.query.allow, filter ? filter : "", request.app_offset, request.app_order, &r->apps);
 			if (!r->error && !request.apps_only)
+			{
+				if (request.query.order.column == PH_SORT_HOST)
+					snapshot_host_keys(&host_keys);
 				r->error = ph_query(s, &request.query, &r->page);
+			}
 			if (!r->error)
 				r->error = ph_getlimits(s, request.query.app, &r->cap, &r->days, &r->mib);
 			r->lost = ph_lost(s);
@@ -480,6 +735,7 @@ static DWORD WINAPI reader_thread(PVOID arg)
 		{
 			free(ph_result);
 			ph_result = r;
+			PostMessageW(GetDlgItem(hwnd, IDC_LOG), PH_RESULT_READY, 0, 0);
 		}
 		else
 			free(r);
@@ -520,9 +776,14 @@ LONG _app_packet_revision(VOID)
 {
 	return InterlockedCompareExchange(&ph_revision, 0, 0);
 }
+LONG _app_packet_audit_revision(VOID)
+{
+	return InterlockedCompareExchange(&ph_audit_revision, 0, 0);
+}
 VOID _app_packet_init(HWND hwnd)
 {
 	PR_STRING dir = _r_app_getprofiledirectory();
+	_app_packet_reloadwatches();
 	InitializeCriticalSection(&ph_lock);
 	swprintf_s(ph_path, RTL_NUMBER_OF(ph_path), L"%s\\packet-history.db", dir->buffer);
 	ph_write_event = CreateEventW(NULL, FALSE, FALSE, NULL);
@@ -532,7 +793,7 @@ VOID _app_packet_init(HWND hwnd)
 	ph_dns_event = CreateEventW(NULL, FALSE, FALSE, NULL);
 	ph_dns_thread = CreateThread(NULL, 0, dns_thread, NULL, 0, NULL);
 	ph_writer = CreateThread(NULL, 0, writer_thread, NULL, 0, NULL);
-	ph_reader = CreateThread(NULL, 0, reader_thread, NULL, 0, NULL);
+	ph_reader = CreateThread(NULL, 0, reader_thread, hwnd, 0, NULL);
 	if (!ph_writer || !ph_reader)
 	{
 		error_text(L"Could not start packet history workers.");
@@ -545,6 +806,7 @@ VOID _app_packet_shutdown(VOID)
 {
 	if (!ph_initialized)
 		return;
+	_app_packet_stop_audit_timer();
 	EnterCriticalSection(&ph_lock);
 	ph_capture_budget.closed = 1;
 	ph_history_budget.closed = 1;

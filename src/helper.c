@@ -2,6 +2,7 @@
 // Copyright (c) 2016-2026 Henry++
 
 #include "global.h"
+#include "share_path.h"
 
 VOID NTAPI _app_dereferenceapp (
 	_In_ PVOID entry
@@ -87,6 +88,9 @@ VOID NTAPI _app_dereferencelog (
 
 	if (ptr_item->username)
 		_r_obj_dereference (ptr_item->username);
+
+	if (ptr_item->service)
+		_r_obj_dereference (ptr_item->service);
 
 	if (ptr_item->path)
 		_r_obj_dereference (ptr_item->path);
@@ -558,6 +562,63 @@ BOOLEAN _app_isappsigned (
 	return is_signed;
 }
 
+// Build a stable UNC identity without opening the share or requiring an online file.
+_Ret_maybenull_
+PR_STRING _app_getnetworkapppath (
+	_In_ LPCWSTR path
+)
+{
+	LPCWSTR tail = sw_share_path_tail (path);
+	LPCWSTR drive_path;
+	PR_STRING unc, normalized = NULL;
+	ULONG length, copied;
+
+	if (tail)
+	{
+		unc = _r_obj_concatstrings (2, L"\\\\", tail);
+	}
+	else
+	{
+		if (!path)
+			return NULL;
+		drive_path = sw_skip_share_prefix (path, L"\\\\?\\");
+		if (!drive_path)
+			drive_path = sw_skip_share_prefix (path, L"\\??\\");
+		if (!drive_path)
+			drive_path = path;
+		if (!drive_path[0] || drive_path[1] != L':' || drive_path[2] != L'\\')
+			return NULL;
+
+		WCHAR drive[] = {drive_path[0], L':', UNICODE_NULL};
+		WCHAR target[1024];
+
+		// Query the local drive mapping. This does not contact the server.
+		if (!QueryDosDeviceW (drive, target, RTL_NUMBER_OF (target)))
+			return NULL;
+
+		tail = sw_share_prefix_tail (target);
+		if (!tail || !*tail)
+			return NULL;
+
+		// The target can end with a separator when the drive maps a share root.
+		unc = _r_obj_concatstrings (3, L"\\\\", tail, tail[wcslen (tail) - 1] == L'\\' ? drive_path + 3 : drive_path + 2);
+	}
+
+	length = GetFullPathNameW (unc->buffer, 0, NULL, NULL);
+	if (length && length <= 32767)
+	{
+		normalized = _r_obj_createstring_ex (NULL, (length - 1) * sizeof (WCHAR));
+		copied = GetFullPathNameW (unc->buffer, length, normalized->buffer, NULL);
+		if (!copied || copied >= length || !sw_share_path_tail (normalized->buffer))
+			_r_obj_clearreference ((PVOID_PTR)&normalized);
+		else
+			_r_str_trimtonullterminator (&normalized->sr);
+	}
+
+	_r_obj_dereference (unc);
+	return normalized;
+}
+
 BOOLEAN _app_isappvalidbinary (
 	_In_opt_ PR_STRING path
 )
@@ -582,7 +643,7 @@ BOOLEAN _app_isappvalidpath (
 		return FALSE;
 
 	if (path->buffer[1] != L':' || path->buffer[2] != L'\\')
-		return FALSE;
+		return sw_share_path_tail (path->buffer) != NULL && path->buffer[0] == L'\\' && path->buffer[1] == L'\\';
 
 	return TRUE;
 }

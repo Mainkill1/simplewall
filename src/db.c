@@ -225,7 +225,10 @@ VOID _app_db_parse_app (
 	}
 
 	// workaround for native paths (#817)
-	if (_r_str_isstartswith2 (&path->sr, L"\\device\\", TRUE))
+	string = _app_getnetworkapppath (path->buffer);
+	if (string)
+		_r_obj_movereference ((PVOID_PTR)&path, string);
+	else if (_r_str_isstartswith2 (&path->sr, L"\\device\\", TRUE))
 		_r_obj_movereference ((PVOID_PTR)&path, _r_path_dospathfromnt (&path->sr));
 
 	if (!_r_obj_isstringempty2 (path))
@@ -422,6 +425,10 @@ VOID _app_db_parse_rule (
 
 			if (status != STATUS_SUCCESS)
 				_r_obj_movereference ((PVOID_PTR)&path_string, _r_obj_createstring2 (&first_part));
+
+			PR_STRING network_path = _app_getnetworkapppath (path_string->buffer);
+			if (network_path)
+				_r_obj_movereference ((PVOID_PTR)&path_string, network_path);
 
 			app_hash = _r_str_gethash (&path_string->sr, TRUE);
 

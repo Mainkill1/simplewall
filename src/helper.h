@@ -112,6 +112,11 @@ BOOLEAN _app_isappsigned (
 	_In_ ULONG app_hash
 );
 
+_Ret_maybenull_
+PR_STRING _app_getnetworkapppath (
+	_In_ LPCWSTR path
+);
+
 BOOLEAN _app_isappvalidbinary (
 	_In_opt_ PR_STRING path
 );

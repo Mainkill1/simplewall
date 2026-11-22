@@ -57,6 +57,11 @@ VOID _app_listview_addappitem (
 	_In_ PITEM_APP ptr_app
 );
 
+INT _app_listview_getrulegroup (
+	_In_ PITEM_RULE ptr_rule,
+	_In_ BOOLEAN is_hidden
+);
+
 VOID _app_listview_addruleitem (
 	_In_ HWND hwnd,
 	_In_ PITEM_RULE ptr_rule,

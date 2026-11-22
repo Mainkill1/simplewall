@@ -9,7 +9,7 @@ $project = Split-Path $PSScriptRoot -Parent
 if (-not $Executable) { $Executable = Join-Path $project 'temp/public-sdk-build/simplewall.exe' }
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $running = @(Get-Process simplewall -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $Destination 'simplewall.exe') })
-if ($running.Count) { throw 'Close this performance build before replacing its executable.' }
+if ($running.Count) { throw 'Close Simplewall before replacing its executable.' }
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 $target = Join-Path $Destination 'simplewall.exe'
 $backupSuffix = Get-Date -Format yyyyMMdd-HHmmss
@@ -32,11 +32,19 @@ foreach ($name in @('simplewall.lng','License.txt','Readme.txt','History.txt')) 
 # No profile or settings files are copied over the user's existing data.
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
-$link = $shell.CreateShortcut((Join-Path $desktop 'simplewall (performance build).lnk'))
+$shortcutPath = Join-Path $desktop 'simplewall.lnk'
+$legacyPath = Join-Path $desktop 'simplewall (performance build).lnk'
+$link = $shell.CreateShortcut($shortcutPath)
+if ($link.TargetPath -and $link.TargetPath -ne $target) {
+    $link = $shell.CreateShortcut((Join-Path $desktop 'simplewall (test).lnk'))
+}
 $link.TargetPath = $target
 $link.WorkingDirectory = $Destination
-$link.Description = 'simplewall with large app list performance improvements'
+$link.Description = 'simplewall'
 $link.Save()
+if ((Test-Path -LiteralPath $legacyPath) -and $shell.CreateShortcut($legacyPath).TargetPath -eq $target) {
+    Remove-Item -LiteralPath $legacyPath
+}
 [PSCustomObject]@{Executable=$target;SHA256=(Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash;Shortcut=$link.FullName}
 if ($Launch) {
     Start-Process -FilePath $target -WorkingDirectory $Destination -Verb RunAs

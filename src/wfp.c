@@ -2129,7 +2129,23 @@ NTSTATUS _FwpmGetAppIdFromFileName1 (
 
 	*byte_blob = NULL;
 
-	if (type == DATA_APP_REGULAR || type == DATA_APP_NETWORK || type == DATA_APP_SERVICE)
+	if (type == DATA_APP_NETWORK)
+	{
+		// WFP identifies share executables by their native MUP name. Build the full
+		// identity even when the share is disconnected or the file is inaccessible.
+		path_root = _app_getnetworkapppath (path->buffer);
+		if (!path_root)
+			return STATUS_OBJECT_PATH_INVALID;
+
+		original_path = _r_obj_concatstrings (2, L"\\device\\mup\\", path_root->buffer + 2);
+		_r_str_tolower (&original_path->sr);
+		ByteBlobAlloc (byte_blob, original_path->buffer, original_path->length + sizeof (UNICODE_NULL));
+		_r_obj_dereference (original_path);
+		_r_obj_dereference (path_root);
+		return STATUS_SUCCESS;
+	}
+
+	if (type == DATA_APP_REGULAR || type == DATA_APP_SERVICE)
 	{
 		if (_r_str_gethash (&path->sr, TRUE) == config.ntoskrnl_hash)
 		{

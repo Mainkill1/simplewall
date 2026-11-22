@@ -141,6 +141,7 @@ typedef enum _ENUM_INFO_DATA2
 #define NOTIFICATIONS_ID 4
 #define LOGGING_ID 5
 #define ERRLOG_ID 6
+#define ALLOW_NEW_APPS_ID 8
 
 #define REBAR_TOOLBAR_ID 0
 #define REBAR_SEARCH_ID 1
@@ -267,6 +268,7 @@ typedef struct _ITEM_LOG
 	PR_STRING layer_name;
 	PR_STRING username;
 	PR_STRING path;
+	PR_STRING service;
 
 	volatile PR_STRING remote_addr_str;
 	volatile PR_STRING local_addr_str;
@@ -274,6 +276,7 @@ typedef struct _ITEM_LOG
 	volatile PR_STRING local_host_str;
 
 	LONG64 timestamp;
+	FILETIME event_time;
 	UINT64 filter_id;
 
 	ULONG app_hash;
