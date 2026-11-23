@@ -23,6 +23,25 @@ git diff --function-context 24bbd2ce 8a17a63b -- src/profile.c
 git diff --function-context 24bbd2ce 8a17a63b -- src/search.c src/main.c
 ```
 
+## How large is each PR?
+
+Plan for **one behavior per PR**. Sizes count additions plus deletions in C source and headers, not net growth or test/docs lines. These are planning ranges for clean ports, not diffs already rebased or built. During sizing, upstream was at [`53654634`](https://github.com/henrypp/simplewall/commit/53654634da1fb15c834e7f7bf6190dc7056419bc), which only changed version constants since the audit pin.
+
+| Separate PR | Estimated changed source lines |
+| --- | ---: |
+| Prepared sort keys | 200–260 |
+| Single-pass affected rule rows | 20–35 |
+| Search visibility and narrower refresh | 10–25 |
+| Search debounce | 15–25 |
+| Toolbar checked state | 30–45 |
+| Async file availability | 65–100 |
+| Metadata job deduplication and cleanup | 50–75 |
+| Redraw batching | 40–65 |
+| Rule membership index | 95–125 |
+| Connection highlight index | 70–90 |
+
+Range midpoint average: **72**; midpoint median: **58** (rounded). Without prepared sort keys, the average is **54**. The fork's scoped rule-row change is **+18/−4** (22 changed), and the toolbar slice is **+27/−9** (36 changed). The raw sort slice is **+117/−141** (258 changed), including a small adjacent redraw helper and excluding message wiring; do not treat it as a standalone patch. Excludes fork-only Rules tabs, investigation-only alert/packet-log work, and conditional Refresh behavior and UNC identity changes. Do not squeeze the sort's key preparation and comparator semantics into separate changes merely to meet a line quota.
+
 ## Evidence and submission gate
 
 - **Behavior verified:** Fork portable tests for checkbox/numeric sort ordering, unchanged search visibility and rule-index reuse/invalidation passed. These use extracted production C and shims, not a running upstream Windows UI. The audit overall had 22 passes and 2 SDK-dependent skips.
