@@ -1,8 +1,10 @@
 # Give Rules rows a real group at insertion
 
-[Back to upstream candidates](Home.md) · **Send first · small, reproduce first**
+[Back to upstream candidates](Home.md) · **Fork-only regression · not an upstream candidate**
 
 ## What changes and why
+
+The fork maintainer observed blank Rules tabs only after the fork changed the packet-capture tab. No independent reproduction on upstream has been established. Keep this page for fork history, not as evidence of an upstream defect.
 
 Blocklist, System Rules, and User Rules could look empty if the group-enabled control rejected insertion with a callback group. Assign an existing group when inserting, honor the returned row index and free the context if insertion fails.
 
@@ -45,7 +47,6 @@ Exact local diff, from a clone with the fork commits:
 git diff 24bbd2ce 2b0a5ca6 -- src/listview.c src/profile.c
 ```
 
-## Smallest upstream scope and acceptance check
+## Fork regression check
 
-Keep the shared group resolver and consistent hidden/disabled/special/global mapping. Do not change rule evaluation or packet-log groups. Fork test passed; verify native tabs including disabled and app-scoped rules with upstream's current SDK. If native upstream already inserts correctly, pitch defensive returned-index handling only or drop it.
-
+Keep the shared group resolver and consistent hidden/disabled/special/global mapping. Do not change rule evaluation or packet-log groups. Fork test passed. For releases of this fork, verify native Blocklist, System Rules, and User Rules tabs with disabled and app-scoped rules. Reconsider upstreaming only if the same failure is independently reproduced on a clean upstream build.

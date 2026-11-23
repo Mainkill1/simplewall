@@ -1,8 +1,16 @@
-# Reduce new-app prompt stalls without changing firewall behavior
+# New-app alert stalls during traffic bursts
 
-[Back to upstream candidates](Home.md) · **High impact · small first experiment; worker/persistence follow-up**
+[Back to upstream candidates](Home.md) · **Open problem report · no fix or root cause established**
 
-## What changes and why
+## Symptom, expected behavior, and reproduction
+
+**Observed by the fork maintainer:** Under a burst of network activity, such as a browser opening or restoring many tabs, the desktop feels temporarily unresponsive until simplewall displays the alert for a newly encountered app. The exact browser/build, event count, stall duration, and whether unrelated windows stop processing input have not been measured. A browser with 20 tabs is an example, not a required threshold or evidence that each tab is a distinct executable or emits an ICMP ping.
+
+**Expected:** The alert appears without blocking normal window interaction; existing allow/block policy and one decision per newly discovered app are preserved.
+
+**Reproduction to try:** Use a disposable Windows VM and snapshot. Start with a test executable absent from the simplewall profile; keep policy unchanged, notifications on, and live logging off on the first run. Compare one blocked connection with a burst of connection attempts from that same newly discovered app. Repeat after restoring the snapshot with live logging on, and use a known blocked app as a control. Record first blocked event, alert first paint, and responsiveness of both simplewall and an unrelated window. Note OS/build, profile size, traffic rate, and whether the issue reproduces on clean upstream as well as fork.3.
+
+## What the source shows (not a diagnosis)
 
 Stock discovery inserts an app and synchronously saves the profile from the log path; notification commands also save inline. Fork coalesces UI save requests (500 ms), captures immutable serialized bytes on the UI thread and writes via an ordered worker and `.pending` file. This removes inline disk writes in those paths, not all UI stalls. UI snapshot capture still costs time. fork.3 uses synchronous `SendMessageW` for main-thread discovery and the headless fallback still saves synchronously.
 
@@ -77,7 +85,6 @@ git diff 24bbd2ce 2b0a5ca6 -- src/log.c src/notifications.c src/profile.c src/ma
 
 Separate evidence: [unmerged burst hardening commit](https://github.com/Mainkill1/simplewall/commit/fc6c41b719d0a912f189e8797eeb66af6c440992) and [fork.3 discovery code](https://github.com/Mainkill1/simplewall/blob/2b0a5ca6891f6c0f57387e29cf22d4db3e1880db/src/log.c#L1496-L1559). Do not confuse an earlier branch with released code.
 
-## Smallest upstream scope and acceptance check
+## Evidence still needed
 
-First instrument first-block → popup paint, UI message latency during the prompt, and decision → filter apply; run with live packet logging separately on/off. Start with a behavior-preserving coalesced save or post-only show path, not automatic allow. The unmerged `fc6c41b7` branch is a reference for posting notification display and queuing WFP apply, not a shippable patch: review lifetime, stale decisions, queue drain, and ordering before considering it. If moving disk writes, keep previous file on failure, flush same-generation work before import/exit, and verify export freshness and filter decision semantics. Portable save routing, completion and failure tests passed; the fork's packet backlog measurement is not a new-app popup benchmark.
-
+Record first block → alert paint, UI message latency during the interval, and (separately) decision → filter application. Distinguish the synchronous main-window handoff, profile work, alert construction/paint, and event backlog from one another. A sample of stacks or phase timestamps would be stronger evidence than a guess based on the source. The unmerged branch is historical context only. The packet list's separately measured backlog and the portable save tests do not reproduce this alert stall. No product fix, repro run, or upstream issue was made for this report.
